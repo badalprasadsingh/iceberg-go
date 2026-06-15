@@ -242,7 +242,101 @@ func (c *Catalog) DropSQLTables(ctx context.Context) error {
 }
 
 func (c *Catalog) ensureTablesExist() error {
-	return c.CreateSQLTables(context.Background())
+	ctx := context.Background()
+	if err := c.CreateSQLTables(ctx); err != nil {
+		return err
+	}
+	// Backfill iceberg-java JdbcCatalog V0 schema (no iceberg_type
+	// column) to V1 so this catalog can co-exist with a Java
+	// JdbcCatalog that was initialised against the same database
+	// without `jdbc.schema-version=V1`. Without this, every read query
+	// on iceberg_tables will fail with `column iceberg_type does not
+	// exist` because all our queries reference IcebergType.
+	return c.migrateJavaV0Schema(ctx)
+}
+
+// migrateJavaV0Schema brings an existing iceberg_tables created by
+// iceberg-java's JdbcCatalog at default schema-version (V0) up to V1 by
+// adding the missing iceberg_type column and back-filling rows with
+// 'TABLE'. It is idempotent and safe to run on an already-V1 schema:
+// the column-presence probe means we only issue ALTER/UPDATE on the
+// dialects + catalogs that actually need it.
+//
+// Why this lives in ensureTablesExist:
+// CreateSQLTables uses CREATE TABLE IF NOT EXISTS, which is a no-op
+// when iceberg_tables already exists with the V0 column set
+// (catalog_name, table_namespace, table_name, metadata_location,
+// previous_metadata_location). All subsequent SELECT/INSERT/UPDATE
+// statements bun emits include the iceberg_type column because the
+// sqlIcebergTable model declares it, so they fail immediately on V0.
+func (c *Catalog) migrateJavaV0Schema(ctx context.Context) error {
+	hasCol, err := c.icebergTypeColumnExists(ctx)
+	if err != nil {
+		// If we cannot introspect (e.g. dialect not covered below) the
+		// safest fallback is to assume V1 and let CreateSQLTables's
+		// CREATE-IF-NOT-EXISTS plus the regular query path handle it.
+		// This preserves prior behaviour for catalogs not created by
+		// iceberg-java.
+		return nil
+	}
+	if hasCol {
+		return nil
+	}
+
+	// Add the column nullable so existing rows remain valid, then
+	// back-fill rows with 'TABLE' (the only legal value pre-V1).
+	if _, err := c.db.ExecContext(ctx,
+		"ALTER TABLE iceberg_tables ADD COLUMN iceberg_type VARCHAR(5)"); err != nil {
+		return fmt.Errorf("migrate iceberg_tables to V1 (add iceberg_type): %w", err)
+	}
+	if _, err := c.db.ExecContext(ctx,
+		"UPDATE iceberg_tables SET iceberg_type = ? WHERE iceberg_type IS NULL",
+		TableType); err != nil {
+		return fmt.Errorf("migrate iceberg_tables to V1 (backfill iceberg_type): %w", err)
+	}
+	return nil
+}
+
+// icebergTypeColumnExists probes information_schema (postgres / mysql /
+// mssql) or sqlite_master (sqlite) for the iceberg_type column.
+// Returns an error for dialects we cannot introspect so the caller can
+// decide whether to skip the migration.
+func (c *Catalog) icebergTypeColumnExists(ctx context.Context) (bool, error) {
+	var (
+		query string
+		args  []any
+	)
+	switch dialectName := c.db.Dialect().Name().String(); dialectName {
+	case "pg", "postgres":
+		query = `SELECT 1 FROM information_schema.columns
+		         WHERE table_name = 'iceberg_tables'
+		           AND column_name = 'iceberg_type' LIMIT 1`
+	case "mysql":
+		query = `SELECT 1 FROM information_schema.columns
+		         WHERE table_schema = DATABASE()
+		           AND table_name = 'iceberg_tables'
+		           AND column_name = 'iceberg_type' LIMIT 1`
+	case "mssql":
+		query = `SELECT TOP 1 1 FROM information_schema.columns
+		         WHERE table_name = 'iceberg_tables'
+		           AND column_name = 'iceberg_type'`
+	case "sqlite":
+		// SQLite always uses iceberg-go to create iceberg_tables (no
+		// Java JdbcCatalog story), so any pre-existing table must
+		// already have iceberg_type.
+		return true, nil
+	default:
+		return false, fmt.Errorf("unsupported dialect for V0 migration: %s", dialectName)
+	}
+	row := c.db.QueryRowContext(ctx, query, args...)
+	var dummy int
+	if err := row.Scan(&dummy); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (c *Catalog) namespaceExists(ctx context.Context, ns string) (bool, error) {
@@ -344,6 +438,23 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 		return current.Metadata(), current.MetadataLocation(), nil
 	}
 
+	// Merge catalog-level properties (s3.endpoint, s3.access-key-id,
+	// s3.region, ...) into the IO props used to upload the metadata
+	// JSON. internal.UpdateAndStageTable, unlike CreateStagedTable,
+	// does *not* propagate c.props into the staged table's FS factory:
+	// it only carries the table metadata properties (format-version,
+	// write.format.default, ...). Without this merge, every CommitTable
+	// after the initial CreateTable falls back to the default AWS S3
+	// endpoint and fails against custom endpoints (e.g. MinIO returns
+	// 301 PermanentRedirect for s3.amazonaws.com requests).
+	//
+	// TEMPORARILY DISABLED to reproduce the upstream bug where
+	// CommitTable drops catalog properties when writing metadata.json.
+	// Re-enable by replacing the WriteMetadata call below with:
+	//   ioProps := iceberg.Properties{}
+	//   maps.Copy(ioProps, c.props)
+	//   maps.Copy(ioProps, staged.Properties())
+	//   internal.WriteMetadata(ctx, staged.Metadata(), staged.MetadataLocation(), ioProps)
 	if err := internal.WriteMetadata(ctx, staged.Metadata(), staged.MetadataLocation(), staged.Properties()); err != nil {
 		return nil, "", err
 	}

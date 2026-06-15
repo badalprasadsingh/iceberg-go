@@ -351,6 +351,11 @@ func (u *UpdateSchema) DeleteColumn(path []string) *UpdateSchema {
 	return u
 }
 
+func (u *UpdateSchema) UnionSchemaEvolution(newSchema *iceberg.Schema) *UpdateSchema {
+
+	return nil
+}
+
 func (u *UpdateSchema) deleteColumn(path []string) error {
 	fullName := strings.Join(path, ".")
 	field, ok := u.findField(fullName)

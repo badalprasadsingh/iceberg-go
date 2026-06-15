@@ -78,6 +78,38 @@ func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "eu-west-1", cfg.Region)
 	})
+
+	t.Run("remote signing enabled with local access key falls back to local SigV4", func(t *testing.T) {
+		t.Parallel()
+
+		// Regression coverage for the Lakekeeper case: the catalog
+		// advertises s3.remote-signing-enabled=true in its LoadTable
+		// response but also vends (or accepts) local HMAC credentials
+		// in the same merged props. We must accept this and use the
+		// local creds for SigV4 signing, not fail with "remote S3
+		// request signing is not supported".
+		_, err := ParseAWSConfig(context.Background(), map[string]string{
+			io.S3RemoteSigningEnabled: "true",
+			io.S3AccessKeyID:          "AKIDEXAMPLE",
+			io.S3SecretAccessKey:      "secretexample",
+			io.S3Region:               "us-east-1",
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("remote signing enabled with session token falls back to local SigV4", func(t *testing.T) {
+		t.Parallel()
+
+		// Vended credentials may arrive as a session-token-only set
+		// (STS-style). That still counts as "local credentials
+		// available".
+		_, err := ParseAWSConfig(context.Background(), map[string]string{
+			io.S3RemoteSigningEnabled: "true",
+			io.S3SessionToken:         "FwoGZXIvYXdzE...",
+			io.S3Region:               "us-east-1",
+		})
+		require.NoError(t, err)
+	})
 }
 
 func TestParseAWSConfigUnsupportedProperty(t *testing.T) {
