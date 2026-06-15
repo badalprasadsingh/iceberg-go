@@ -53,10 +53,34 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 		}
 	}
 
-	// Remote S3 request signing is not implemented yet.
+	// Remote S3 request signing (where the catalog signs each S3
+	// request on the client's behalf via an HTTP signer endpoint) is
+	// not implemented in the gocloud S3 IO. However, REST catalogs
+	// like Lakekeeper advertise s3.remote-signing-enabled=true in
+	// their LoadTable config even when they ALSO vend (or accept)
+	// local HMAC credentials in the same response — the flag is just
+	// a server-side capability hint, not a hard requirement.
+	//
+	// If we already have local credentials (vended via the REST
+	// catalog's storage-credentials, or supplied directly by the
+	// caller) we can perform standard local SigV4 signing and ignore
+	// the remote-signing hint. This matches Iceberg-Java's and
+	// Iceberg-Python's behavior on the same warehouses and is the
+	// "io/gocloud/s3.go patch" referenced by
+	// testing/lakekeeper_vended/main.go.
+	//
+	// Only when remote signing is explicitly enabled AND no local
+	// credentials are available do we still error out — that is the
+	// only case where remote signing would actually be required and
+	// we cannot satisfy it.
 	if v, ok := props[io.S3RemoteSigningEnabled]; ok {
 		if enabled, err := strconv.ParseBool(v); err == nil && enabled {
-			return nil, errors.New("remote S3 request signing is not supported")
+			hasLocalCreds := props[io.S3AccessKeyID] != "" ||
+				props[io.S3SecretAccessKey] != "" ||
+				props[io.S3SessionToken] != ""
+			if !hasLocalCreds {
+				return nil, errors.New("remote S3 request signing is not supported")
+			}
 		}
 	}
 
@@ -154,6 +178,27 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 	client := s3.NewFromConfig(*awscfg, func(o *s3.Options) {
 		if endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
+			// Custom S3-compatible endpoints (GCS S3 interop, Cloudflare
+			// R2, some MinIO/Ceph builds, etc.) do not understand the
+			// flow-control checksum headers that aws-sdk-go-v2 v1.32+
+			// (Jan 2025) began adding to PutObject / UploadPart /
+			// CreateMultipartUpload by default. Those headers
+			// (x-amz-sdk-checksum-algorithm, x-amz-checksum-crc32) are
+			// part of the SigV4 signed payload, so a server that
+			// silently drops or ignores them recomputes a different
+			// signature and rejects the request with 403
+			// SignatureDoesNotMatch — even with valid credentials.
+			//
+			// Iceberg-Java and Iceberg-Python don't exhibit this because
+			// neither stack adds these headers by default. To restore
+			// parity for non-AWS endpoints (and to keep credential
+			// vending working against Lakekeeper warehouses backed by
+			// GCS, R2, etc.) we switch to WhenRequired here, which is
+			// the pre-2025 behaviour. Operations that strictly require a
+			// checksum (e.g. DeleteObjects) still get one because the
+			// SDK forces it irrespective of this setting.
+			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+			o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
 		}
 		o.UsePathStyle = resolveUsePathStyle(endpoint, props)
 		o.DisableLogOutputChecksumValidationSkipped = true
