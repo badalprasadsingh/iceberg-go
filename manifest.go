@@ -626,8 +626,12 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 			return nil, fmt.Errorf("manifest file's 'format-version' metadata is invalid: %w", err)
 		}
 	}
-	if formatVersion != file.Version() {
-		return nil, fmt.Errorf("manifest file's 'format-version' metadata indicates version %d, but entry from manifest list indicates version %d",
+	// The manifest's own metadata is authoritative for its version. A v2/v3
+	// manifest list may reference older manifests so a table can be upgraded
+	// in place without rewriting history; only a manifest newer than the list
+	// referencing it indicates corruption.
+	if formatVersion > file.Version() {
+		return nil, fmt.Errorf("manifest file's 'format-version' metadata indicates version %d, which is newer than the v%d manifest list referencing it",
 			formatVersion, file.Version())
 	}
 
@@ -944,16 +948,6 @@ func (v3writerImpl) prepareEntry(entry *manifestEntry, snapshotID int64) (Manife
 		}
 	}
 
-	// v3 spec deprecates data_file.distinct_counts (Java parity:
-	// apache/iceberg#12182). prepareEntry takes ownership of the entry's data
-	// file and clears the Avro-facing pointer; the cached distinctCntMap and
-	// DistinctValueCounts() getter are intentionally preserved so in-process
-	// readers keep their view. Best-effort: only the in-tree *dataFile is
-	// cleared; third-party DataFile impls bypass this guard.
-	if df, ok := entry.DataFile().(*dataFile); ok {
-		df.DistinctCounts = nil
-	}
-
 	return entry, nil
 }
 
@@ -1238,10 +1232,6 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...M
 		return nil, err
 	}
 
-	if w.minSeqNum == initialSequenceNumber {
-		w.minSeqNum = -1
-	}
-
 	partitions, err := constructPartitionSummaries(w.spec, w.schema, w.partitions)
 	if err != nil {
 		return nil, err
@@ -1340,9 +1330,10 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 		dataFile.PartitionData = convertedPartitionData
 	}
 
-	if (entry.Status() == EntryStatusADDED || entry.Status() == EntryStatusEXISTING) &&
-		entry.SequenceNum() > 0 && (w.minSeqNum < 0 || entry.SequenceNum() < w.minSeqNum) {
-		w.minSeqNum = entry.SequenceNum()
+	if entry.Status() == EntryStatusADDED || entry.Status() == EntryStatusEXISTING {
+		if seq := entry.SequenceNum(); seq >= 0 && (w.minSeqNum < 0 || seq < w.minSeqNum) {
+			w.minSeqNum = seq
+		}
 	}
 
 	toEncode, err := w.impl.prepareEntry(entry, w.snapshotID)
@@ -1685,7 +1676,7 @@ func avroColMapToMap[K comparable, V any](c *[]colMap[K, V]) map[K]V {
 		return nil
 	}
 
-	out := make(map[K]V)
+	out := make(map[K]V, len(*c))
 	for _, data := range *c {
 		out[data.Key] = data.Value
 	}
@@ -1829,20 +1820,13 @@ type dataFile struct {
 	fieldIDToPartitionData map[int]any
 	fieldIDToFixedSize     map[int]int
 
-	specID   int32
-	initMaps sync.Once
+	specID          int32
+	initPartition   sync.Once
+	initColumnStats sync.Once
 }
 
-func (d *dataFile) initializeMapData() {
-	d.initMaps.Do(func() {
-		d.colSizeMap = avroColMapToMap(d.ColSizes)
-		d.valCntMap = avroColMapToMap(d.ValCounts)
-		d.nullCntMap = avroColMapToMap(d.NullCounts)
-		d.nanCntMap = avroColMapToMap(d.NaNCounts)
-		d.distinctCntMap = avroColMapToMap(d.DistinctCounts)
-		d.lowerBoundMap = avroColMapToMap(d.LowerBounds)
-		d.upperBoundMap = avroColMapToMap(d.UpperBounds)
-		// Populate fieldIDToPartition map if dataFile read from manifest file
+func (d *dataFile) initPartitionData() {
+	d.initPartition.Do(func() {
 		if len(d.fieldIDToPartitionData) < len(d.PartitionData) {
 			d.fieldIDToPartitionData = make(map[int]any, len(d.PartitionData))
 			for k, v := range d.PartitionData {
@@ -1855,7 +1839,23 @@ func (d *dataFile) initializeMapData() {
 	})
 }
 
+func (d *dataFile) initColumnStatsData() {
+	d.initColumnStats.Do(func() {
+		d.colSizeMap = avroColMapToMap(d.ColSizes)
+		d.valCntMap = avroColMapToMap(d.ValCounts)
+		d.nullCntMap = avroColMapToMap(d.NullCounts)
+		d.nanCntMap = avroColMapToMap(d.NaNCounts)
+		d.distinctCntMap = avroColMapToMap(d.DistinctCounts)
+		d.lowerBoundMap = avroColMapToMap(d.LowerBounds)
+		d.upperBoundMap = avroColMapToMap(d.UpperBounds)
+	})
+}
+
 func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
+	if v == nil {
+		return nil
+	}
+
 	if logicalType, ok := d.fieldIDToLogicalType[fieldID]; ok {
 		// twmb/avro returns rich Go types (time.Time, time.Duration,
 		// *big.Rat, [16]byte) when the file schema includes a logicalType,
@@ -1936,7 +1936,7 @@ func (d *dataFile) FileFormat() FileFormat            { return d.Format }
 
 // Partition returns the partition data as a map of partition field ID to value.
 func (d *dataFile) Partition() map[int]any {
-	d.initializeMapData()
+	d.initPartitionData()
 
 	return d.fieldIDToPartitionData
 }
@@ -1946,43 +1946,43 @@ func (d *dataFile) FileSizeBytes() int64 { return d.FileSize }
 func (d *dataFile) SpecID() int32        { return d.specID }
 
 func (d *dataFile) ColumnSizes() map[int]int64 {
-	d.initializeMapData()
+	d.initColumnStatsData()
 
 	return d.colSizeMap
 }
 
 func (d *dataFile) ValueCounts() map[int]int64 {
-	d.initializeMapData()
+	d.initColumnStatsData()
 
 	return d.valCntMap
 }
 
 func (d *dataFile) NullValueCounts() map[int]int64 {
-	d.initializeMapData()
+	d.initColumnStatsData()
 
 	return d.nullCntMap
 }
 
 func (d *dataFile) NaNValueCounts() map[int]int64 {
-	d.initializeMapData()
+	d.initColumnStatsData()
 
 	return d.nanCntMap
 }
 
 func (d *dataFile) DistinctValueCounts() map[int]int64 {
-	d.initializeMapData()
+	d.initColumnStatsData()
 
 	return d.distinctCntMap
 }
 
 func (d *dataFile) LowerBoundValues() map[int][]byte {
-	d.initializeMapData()
+	d.initColumnStatsData()
 
 	return d.lowerBoundMap
 }
 
 func (d *dataFile) UpperBoundValues() map[int][]byte {
-	d.initializeMapData()
+	d.initColumnStatsData()
 
 	return d.upperBoundMap
 }
@@ -2248,6 +2248,13 @@ func (b *DataFileBuilder) NaNValueCounts(counts map[int]int64) *DataFileBuilder 
 }
 
 // DistinctValueCounts sets the distinct value counts for the data file.
+//
+// Deprecated: distinct_counts (field 111) is deprecated in every
+// version of the Iceberg spec (apache/iceberg#12182). The Avro
+// manifest-entry schemas omit the field for v1, v2, and v3, so values
+// set here are not transported in manifests written by this library.
+// The setter is retained for round-tripping legacy DataFiles read from
+// older manifests; new code should not call it.
 func (b *DataFileBuilder) DistinctValueCounts(counts map[int]int64) *DataFileBuilder {
 	b.d.DistinctCounts = mapToAvroColMap(counts)
 

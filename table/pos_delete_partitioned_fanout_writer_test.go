@@ -74,7 +74,7 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			name:                   "success",
 			pathToPartitionContext: map[string]partitionContext{"file://namespace/age_bucket=1/test.parquet": {partitionData: map[int]any{iceberg.PartitionDataIDStart: 1}, specID: 0}},
 			input:                  mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, `[{"file_path": "file://namespace/age_bucket=1/test.parquet", "pos": 100}]`),
-			expectedDataFile:       &mockDataFile{columnSizes: map[int]int64{2147483545: 88, 2147483546: 174}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 1, specid: 0, contentType: iceberg.EntryContentPosDeletes, sortOrderID: ptr(1)},
+			expectedDataFile:       &mockDataFile{columnSizes: map[int]int64{2147483545: 86, 2147483546: 172}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 1, specid: 0, contentType: iceberg.EntryContentPosDeletes, sortOrderID: ptr(1)},
 		},
 		// This test case illustrates how the positionDeletePartitionedFanoutWriter does not validate that all records
 		// in a batch have the same file path. Doing so would be prohibitive in the current implementation and
@@ -84,7 +84,7 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			name:                   "batch with records having different file paths",
 			pathToPartitionContext: map[string]partitionContext{"file://namespace/age_bucket=1/test.parquet": {partitionData: map[int]any{iceberg.PartitionDataIDStart: 1}, specID: 0}},
 			input:                  mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, `[{"file_path": "file://namespace/age_bucket=1/test.parquet", "pos": 100}, {"file_path": "file://namespace/age_bucket=0/test.parquet", "pos": 10}]`),
-			expectedDataFile:       &mockDataFile{columnSizes: map[int]int64{2147483545: 96, 2147483546: 187}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 2, specid: 0, contentType: iceberg.EntryContentPosDeletes, sortOrderID: ptr(1)},
+			expectedDataFile:       &mockDataFile{columnSizes: map[int]int64{2147483545: 94, 2147483546: 185}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 2, specid: 0, contentType: iceberg.EntryContentPosDeletes, sortOrderID: ptr(1)},
 		},
 	}
 
@@ -128,9 +128,6 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			require.NoError(t, err)
 
 			writeUUID := uuid.New()
-			cw := newConcurrentDataFileWriter(func(rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
-				return newPositionDeleteWriter(rootLocation, fs, meta, props, opts...)
-			})
 			factory, err := newWriterFactory(t.TempDir(), recordWritingArgs{
 				fs:        &io.LocalFS{},
 				sc:        PositionalDeleteArrowSchema,
@@ -140,7 +137,7 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 				withContentType(iceberg.EntryContentPosDeletes),
 				withFactoryFileSchema(iceberg.PositionalDeleteSchema))
 			require.NoError(t, err)
-			writer := newPositionDeletePartitionedFanoutWriter(latestMeta, cw, tc.pathToPartitionContext, nil, factory)
+			writer := newPositionDeletePartitionedFanoutWriter(latestMeta, tc.pathToPartitionContext, nil, factory)
 
 			dataFileCh := make(chan iceberg.DataFile, 10)
 			err = writer.processBatch(ctx, tc.input, dataFileCh)
@@ -364,9 +361,6 @@ func TestPositionDeletePartitionedFanoutWriterRoutesPartitionsIndependently(t *t
 	}
 
 	writeUUID := uuid.New()
-	cw := newConcurrentDataFileWriter(func(rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
-		return newPositionDeleteWriter(rootLocation, fs, meta, props, opts...)
-	})
 	factory, err := newWriterFactory(t.TempDir(), recordWritingArgs{
 		fs:        &io.LocalFS{},
 		sc:        PositionalDeleteArrowSchema,
@@ -376,7 +370,7 @@ func TestPositionDeletePartitionedFanoutWriterRoutesPartitionsIndependently(t *t
 		withContentType(iceberg.EntryContentPosDeletes),
 		withFactoryFileSchema(iceberg.PositionalDeleteSchema))
 	require.NoError(t, err)
-	writer := newPositionDeletePartitionedFanoutWriter(latestMeta, cw, pathToCtx, nil, factory)
+	writer := newPositionDeletePartitionedFanoutWriter(latestMeta, pathToCtx, nil, factory)
 
 	dataFileCh := make(chan iceberg.DataFile, 4)
 

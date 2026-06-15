@@ -39,7 +39,16 @@ func (e ErrIncompatibleSchema) Error() string {
 			fmt.Fprintf(&problems, "\n- invalid type for %s: %s is not supported until v%d", f.ColName, f.Field.Type, f.UnsupportedType.MinFormatVersion)
 		}
 		if f.InvalidDefault != nil {
-			fmt.Fprintf(&problems, "\n- invalid initial default for %s: non-null default (%v) is not supported until v%d", f.ColName, f.Field.InitialDefault, f.InvalidDefault.MinFormatVersion)
+			if f.InvalidDefault.MustBeNullForType {
+				if f.Field.InitialDefault != nil {
+					fmt.Fprintf(&problems, "\n- invalid initial default for %s: %s columns must default to null", f.ColName, f.Field.Type)
+				}
+				if f.Field.WriteDefault != nil {
+					fmt.Fprintf(&problems, "\n- invalid write default for %s: %s columns must default to null", f.ColName, f.Field.Type)
+				}
+			} else {
+				fmt.Fprintf(&problems, "\n- invalid initial default for %s: non-null default (%v) is not supported until v%d", f.ColName, f.Field.InitialDefault, f.InvalidDefault.MinFormatVersion)
+			}
 		}
 	}
 
@@ -62,8 +71,9 @@ type UnsupportedType struct {
 }
 
 type InvalidDefault struct {
-	MinFormatVersion int
-	WriteDefault     any
+	MinFormatVersion  int
+	WriteDefault      any
+	MustBeNullForType bool
 }
 
 // checkSchemaCompatibility checks that the schema is compatible with the table's format version.
@@ -113,12 +123,23 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 			})
 		}
 
-		if field.InitialDefault != nil && formatVersion < defaultValuesMinFormatVersion {
-			problems = append(problems, IncompatibleField{
-				Field:          field,
-				ColName:        colName,
-				InvalidDefault: &InvalidDefault{MinFormatVersion: defaultValuesMinFormatVersion, WriteDefault: field.InitialDefault},
-			})
+		switch field.Type.(type) {
+		case iceberg.GeometryType, iceberg.GeographyType:
+			if field.InitialDefault != nil || field.WriteDefault != nil {
+				problems = append(problems, IncompatibleField{
+					Field:          field,
+					ColName:        colName,
+					InvalidDefault: &InvalidDefault{MustBeNullForType: true},
+				})
+			}
+		default:
+			if field.InitialDefault != nil && formatVersion < defaultValuesMinFormatVersion {
+				problems = append(problems, IncompatibleField{
+					Field:          field,
+					ColName:        colName,
+					InvalidDefault: &InvalidDefault{MinFormatVersion: defaultValuesMinFormatVersion, WriteDefault: field.InitialDefault},
+				})
+			}
 		}
 	}
 
@@ -134,7 +155,7 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 // version number for types that require newer format versions.
 func minFormatVersionForType(t iceberg.Type) int {
 	switch t.(type) {
-	case iceberg.TimestampNsType, iceberg.TimestampTzNsType, iceberg.UnknownType:
+	case iceberg.TimestampNsType, iceberg.TimestampTzNsType, iceberg.UnknownType, iceberg.VariantType, iceberg.GeometryType, iceberg.GeographyType:
 		return 3
 	default:
 		// All other types supported in v1+
@@ -168,19 +189,35 @@ func (v *unknownTypeValidator) Struct(_ iceberg.StructType, fieldResults []error
 	return nil
 }
 
+func typeRequiresNullDefaults(t iceberg.Type) bool {
+	switch t.(type) {
+	case iceberg.UnknownType, iceberg.VariantType:
+		return true
+	default:
+		return false
+	}
+}
+
 func (v *unknownTypeValidator) Field(field iceberg.NestedField, fieldResult error) error {
 	if fieldResult != nil {
 		return fieldResult
 	}
+	// Optionality: unknown must be optional per spec; variant has no such constraint.
+	// Both require null defaults (enforced below via typeRequiresNullDefaults).
 	if _, isUnknown := field.Type.(iceberg.UnknownType); isUnknown {
 		if field.Required {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked as required", field.Name, field.ID)
+			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked as required",
+				field.Name, field.ID)
 		}
+	}
+	if typeRequiresNullDefaults(field.Type) {
 		if field.InitialDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null initial-default, but got: %v", field.Name, field.ID, field.InitialDefault)
+			return fmt.Errorf("%s type field '%s' (id: %d) must have null initial-default, but got: %v",
+				field.Type, field.Name, field.ID, field.InitialDefault)
 		}
 		if field.WriteDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null write-default, but got: %v", field.Name, field.ID, field.WriteDefault)
+			return fmt.Errorf("%s type field '%s' (id: %d) must have null write-default, but got: %v",
+				field.Type, field.Name, field.ID, field.WriteDefault)
 		}
 	}
 
@@ -195,13 +232,18 @@ func (v *unknownTypeValidator) List(list iceberg.ListType, elemResult error) err
 
 	if _, isUnknown := elem.Type.(iceberg.UnknownType); isUnknown {
 		if elem.Required {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required", elem.Name, elem.ID)
+			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required",
+				elem.Name, elem.ID)
 		}
+	}
+	if typeRequiresNullDefaults(elem.Type) {
 		if elem.InitialDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null-initial-default, but got: %v", elem.Name, elem.ID, elem.InitialDefault)
+			return fmt.Errorf("%s type field '%s' (id: %d) must have null initial-default, but got: %v",
+				elem.Type, elem.Name, elem.ID, elem.InitialDefault)
 		}
 		if elem.WriteDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null write-default but got: %v", elem.Name, elem.ID, elem.WriteDefault)
+			return fmt.Errorf("%s type field '%s' (id: %d) must have null write-default, but got: %v",
+				elem.Type, elem.Name, elem.ID, elem.WriteDefault)
 		}
 	}
 
@@ -219,28 +261,39 @@ func (v *unknownTypeValidator) Map(mapType iceberg.MapType, keyResult, valueResu
 
 	key := mapType.KeyField()
 
-	if _, isUnknown := key.Type.(iceberg.UnknownType); isUnknown {
+	if _, isKeyUnknown := key.Type.(iceberg.UnknownType); isKeyUnknown {
 		if key.Required {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required", key.Name, key.ID)
+			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required",
+				key.Name, key.ID)
 		}
+	}
+	if typeRequiresNullDefaults(key.Type) {
 		if key.InitialDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null-initial-default, but got: %v", key.Name, key.ID, key.InitialDefault)
+			return fmt.Errorf("%s type field '%s' (id: %d) must have null initial-default, but got: %v",
+				key.Type, key.Name, key.ID, key.InitialDefault)
 		}
 		if key.WriteDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null write-default but got: %v", key.Name, key.ID, key.WriteDefault)
+			return fmt.Errorf("%s type field '%s' (id: %d) must have null write-default, but got: %v",
+				key.Type, key.Name, key.ID, key.WriteDefault)
 		}
 	}
 
 	value := mapType.ValueField()
-	if _, isUnknown := value.Type.(iceberg.UnknownType); isUnknown {
+
+	if _, isValueUnknown := value.Type.(iceberg.UnknownType); isValueUnknown {
 		if value.Required {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required", value.Name, value.ID)
+			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required",
+				value.Name, value.ID)
 		}
+	}
+	if typeRequiresNullDefaults(value.Type) {
 		if value.InitialDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null-initial-default, but got: %v", value.Name, value.ID, value.InitialDefault)
+			return fmt.Errorf("%s type field '%s' (id: %d) must have null initial-default, but got: %v",
+				value.Type, value.Name, value.ID, value.InitialDefault)
 		}
 		if value.WriteDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null write-default but got: %v", value.Name, value.ID, value.WriteDefault)
+			return fmt.Errorf("%s type field '%s' (id: %d) must have null write-default, but got: %v",
+				value.Type, value.Name, value.ID, value.WriteDefault)
 		}
 	}
 
@@ -248,6 +301,10 @@ func (v *unknownTypeValidator) Map(mapType iceberg.MapType, keyResult, valueResu
 }
 
 func (v *unknownTypeValidator) Primitive(_ iceberg.PrimitiveType) error {
+	return nil
+}
+
+func (v *unknownTypeValidator) Variant(_ iceberg.VariantType) error {
 	return nil
 }
 
@@ -310,6 +367,10 @@ func (v *complexTypeDefaultValidator) Map(mapType iceberg.MapType, keyResult, va
 }
 
 func (v *complexTypeDefaultValidator) Primitive(_ iceberg.PrimitiveType) error {
+	return nil
+}
+
+func (v *complexTypeDefaultValidator) Variant(_ iceberg.VariantType) error {
 	return nil
 }
 

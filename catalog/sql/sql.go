@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"log"
 	"maps"
 	"slices"
 	"strings"
@@ -168,6 +169,8 @@ func withWriteTx(ctx context.Context, db *bun.DB, fn func(context.Context, bun.T
 		return fn(ctx, tx)
 	})
 }
+
+var _ catalog.PurgeableTable = (*Catalog)(nil)
 
 type Catalog struct {
 	db    *bun.DB
@@ -384,17 +387,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, ns)
 	}
 
-	afs, err := staged.FS(ctx)
-	if err != nil {
-		return nil, err
-	}
-	wfs, ok := afs.(io.WriteFileIO)
-	if !ok {
-		return nil, errors.New("loaded filesystem IO does not support writing")
-	}
-
-	compression := staged.Table.Properties().Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
-	if err := internal.WriteTableMetadata(staged.Metadata(), wfs, staged.MetadataLocation(), compression); err != nil {
+	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
 		return nil, err
 	}
 
@@ -428,7 +421,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 		return nil, "", err
 	}
 
-	staged, err := internal.UpdateAndStageTable(ctx, current, ident, reqs, updates, c)
+	staged, err := internal.UpdateAndStageTable(ctx, c.props, current, ident, reqs, updates, c)
 	if err != nil {
 		return nil, "", err
 	}
@@ -438,24 +431,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 		return current.Metadata(), current.MetadataLocation(), nil
 	}
 
-	// Merge catalog-level properties (s3.endpoint, s3.access-key-id,
-	// s3.region, ...) into the IO props used to upload the metadata
-	// JSON. internal.UpdateAndStageTable, unlike CreateStagedTable,
-	// does *not* propagate c.props into the staged table's FS factory:
-	// it only carries the table metadata properties (format-version,
-	// write.format.default, ...). Without this merge, every CommitTable
-	// after the initial CreateTable falls back to the default AWS S3
-	// endpoint and fails against custom endpoints (e.g. MinIO returns
-	// 301 PermanentRedirect for s3.amazonaws.com requests).
-	//
-	// TEMPORARILY DISABLED to reproduce the upstream bug where
-	// CommitTable drops catalog properties when writing metadata.json.
-	// Re-enable by replacing the WriteMetadata call below with:
-	//   ioProps := iceberg.Properties{}
-	//   maps.Copy(ioProps, c.props)
-	//   maps.Copy(ioProps, staged.Properties())
-	//   internal.WriteMetadata(ctx, staged.Metadata(), staged.MetadataLocation(), ioProps)
-	if err := internal.WriteMetadata(ctx, staged.Metadata(), staged.MetadataLocation(), staged.Properties()); err != nil {
+	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
 		return nil, "", err
 	}
 
@@ -574,6 +550,26 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 
 		return nil
 	})
+}
+
+func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) error {
+	tbl, err := c.LoadTable(ctx, identifier)
+	if err != nil {
+		return err
+	}
+
+	// Drop the table entry from the catalog first
+	err = c.DropTable(ctx, identifier)
+	if err != nil {
+		return err
+	}
+
+	// Physically delete all table files on storage best-effort
+	if purgeErr := tbl.PurgeFiles(ctx); purgeErr != nil {
+		log.Printf("WARNING: dropped table %s but failed to purge files: %v", identifier, purgeErr)
+	}
+
+	return nil
 }
 
 func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {

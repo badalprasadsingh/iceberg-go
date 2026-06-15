@@ -25,7 +25,6 @@ import (
 	"iter"
 	"log"
 	"net/url"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -95,10 +94,13 @@ func validateIdentifier(ident table.Identifier) error {
 // Catalog is a filesystem-based Iceberg catalog that requires no external
 // metastore. All state lives on disk as directories and versioned JSON
 // metadata files. Currently only local filesystem paths are supported.
+var _ catalog.PurgeableTable = (*Catalog)(nil)
+
 type Catalog struct {
-	name      string
-	warehouse string
-	props     iceberg.Properties
+	name       string
+	warehouse  string
+	filesystem HadoopCatalogFS
+	props      iceberg.Properties
 }
 
 // NewCatalog creates a new Hadoop catalog rooted at the given warehouse path.
@@ -143,7 +145,10 @@ func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, err
 	return &Catalog{
 		name:      name,
 		warehouse: warehouse,
-		props:     props,
+		// for the time being, we default to localfs since there is not yet
+		// support for other filesystems like blob stores
+		filesystem: icebergio.LocalFS{},
+		props:      props,
 	}, nil
 }
 
@@ -180,10 +185,10 @@ func (c *Catalog) defaultTableLocation(ident table.Identifier) string {
 //   - v*.metadata.json (Hadoop catalog format)
 //   - <seq>-<uuid>.metadata.json (Java/PyIceberg format)
 //   - version-hint.text
-func isTableDir(path string) bool {
+func isTableDir(filesystem HadoopCatalogFS, path string) bool {
 	metaDir := filepath.Join(path, "metadata")
 
-	entries, err := os.ReadDir(metaDir)
+	entries, err := filesystem.ReadDir(metaDir)
 	if err != nil {
 		return false
 	}
@@ -205,7 +210,7 @@ func isTableDir(path string) bool {
 }
 
 func (c *Catalog) readVersionHint(ident table.Identifier) int {
-	data, err := os.ReadFile(c.versionHintPath(ident))
+	data, err := c.filesystem.ReadFile(c.versionHintPath(ident))
 	if err != nil {
 		return 0
 	}
@@ -224,15 +229,15 @@ func (c *Catalog) writeVersionHint(ident table.Identifier, version int) {
 	hintPath := c.versionHintPath(ident)
 
 	content := []byte(strconv.Itoa(version))
-	if err := os.WriteFile(tempPath, content, 0o644); err != nil {
+	if err := c.filesystem.WriteFile(tempPath, content); err != nil {
 		log.Printf("hadoop catalog: failed to write version hint temp file: %v", err)
 
 		return
 	}
 
-	if err := os.Rename(tempPath, hintPath); err != nil {
+	if err := c.filesystem.Rename(tempPath, hintPath); err != nil {
 		log.Printf("hadoop catalog: failed to rename version hint: %v", err)
-		os.Remove(tempPath)
+		_ = c.filesystem.Remove(tempPath)
 	}
 }
 
@@ -242,13 +247,13 @@ func (c *Catalog) metadataVersionExists(ident table.Identifier, version int) boo
 	dir := c.metadataDir(ident)
 	plain := filepath.Join(dir, fmt.Sprintf("v%d.metadata.json", version))
 
-	if _, err := os.Stat(plain); err == nil {
+	if _, err := c.filesystem.Stat(plain); err == nil {
 		return true
 	}
 
 	gz := filepath.Join(dir, fmt.Sprintf("v%d.gz.metadata.json", version))
 
-	_, err := os.Stat(gz)
+	_, err := c.filesystem.Stat(gz)
 
 	return err == nil
 }
@@ -270,7 +275,7 @@ func (c *Catalog) findVersion(ident table.Identifier) (int, error) {
 
 	dir := c.metadataDir(ident)
 
-	entries, err := os.ReadDir(dir)
+	entries, err := c.filesystem.ReadDir(dir)
 	if err != nil {
 		return 0, fmt.Errorf("hadoop catalog: cannot read metadata directory for %s: %w",
 			strings.Join(ident, "."), catalog.ErrNoSuchTable)
@@ -312,8 +317,8 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	ns := catalog.NamespaceFromIdent(ident)
 	nsPath := c.namespaceToPath(ns)
 
-	info, err := os.Stat(nsPath)
-	if os.IsNotExist(err) || (err == nil && !info.IsDir()) {
+	info, err := c.filesystem.Stat(nsPath)
+	if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()) {
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
 	}
 
@@ -326,7 +331,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, errors.New("hadoop catalog: custom table locations are not supported")
 	}
 
-	if isTableDir(loc) {
+	if isTableDir(c.filesystem, loc) {
 		return nil, fmt.Errorf("%w: %s", catalog.ErrTableAlreadyExists, strings.Join(ident, "."))
 	}
 
@@ -336,7 +341,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	}
 
 	metaDir := c.metadataDir(ident)
-	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+	if err := c.filesystem.MkdirAll(metaDir); err != nil {
 		return nil, fmt.Errorf("hadoop catalog: failed to create metadata directory: %w", err)
 	}
 
@@ -351,14 +356,14 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		}
 	}
 
-	if err := internal.WriteTableMetadata(metadata, icebergio.LocalFS{}, tempPath, compression); err != nil {
-		os.Remove(tempPath)
+	if err := internal.WriteTableMetadata(metadata, c.filesystem, tempPath, compression); err != nil {
+		_ = c.filesystem.Remove(tempPath)
 
 		return nil, fmt.Errorf("hadoop catalog: failed to write table metadata: %w", err)
 	}
 
-	if err := os.Rename(tempPath, metaPath); err != nil {
-		os.Remove(tempPath)
+	if err := c.filesystem.Rename(tempPath, metaPath); err != nil {
+		_ = c.filesystem.Remove(tempPath)
 
 		return nil, fmt.Errorf("hadoop catalog: failed to commit metadata file: %w", err)
 	}
@@ -396,7 +401,7 @@ func (c *Catalog) CheckTableExists(_ context.Context, ident table.Identifier) (b
 		return false, nil
 	}
 
-	return isTableDir(c.tableToPath(ident)), nil
+	return isTableDir(c.filesystem, c.tableToPath(ident)), nil
 }
 
 func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
@@ -462,7 +467,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 
 	// Step 7: Create metadata directory if needed (create-via-commit).
 	metaDir := c.metadataDir(ident)
-	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+	if err := c.filesystem.MkdirAll(metaDir); err != nil {
 		return nil, "", fmt.Errorf("hadoop catalog: failed to create metadata directory: %w", err)
 	}
 
@@ -471,23 +476,23 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 
 	compression := updated.Properties().Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
 
-	if err := internal.WriteTableMetadata(updated, icebergio.LocalFS{}, tempPath, compression); err != nil {
-		os.Remove(tempPath)
+	if err := internal.WriteTableMetadata(updated, c.filesystem, tempPath, compression); err != nil {
+		_ = c.filesystem.Remove(tempPath)
 
 		return nil, "", fmt.Errorf("hadoop catalog: failed to write table metadata: %w", err)
 	}
 
 	// Conflict detection: target file must not already exist.
-	if _, err := os.Stat(newMetaPath); err == nil {
-		os.Remove(tempPath)
+	if _, err := c.filesystem.Stat(newMetaPath); err == nil {
+		_ = c.filesystem.Remove(tempPath)
 
 		return nil, "", fmt.Errorf("hadoop catalog: version %d already exists for table %s",
 			newVersion, strings.Join(ident, "."))
 	}
 
 	// Atomic commit via rename.
-	if err := os.Rename(tempPath, newMetaPath); err != nil {
-		os.Remove(tempPath)
+	if err := c.filesystem.Rename(tempPath, newMetaPath); err != nil {
+		_ = c.filesystem.Remove(tempPath)
 
 		return nil, "", fmt.Errorf("hadoop catalog: failed to commit metadata file: %w", err)
 	}
@@ -508,8 +513,8 @@ func (c *Catalog) ListTables(_ context.Context, ns table.Identifier) iter.Seq2[t
 
 		nsPath := c.namespaceToPath(ns)
 
-		info, err := os.Stat(nsPath)
-		if os.IsNotExist(err) || (err == nil && !info.IsDir()) {
+		info, err := c.filesystem.Stat(nsPath)
+		if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()) {
 			yield(nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, ".")))
 
 			return
@@ -521,7 +526,7 @@ func (c *Catalog) ListTables(_ context.Context, ns table.Identifier) iter.Seq2[t
 			return
 		}
 
-		entries, err := os.ReadDir(nsPath)
+		entries, err := c.filesystem.ReadDir(nsPath)
 		if err != nil {
 			yield(nil, fmt.Errorf("hadoop catalog: failed to read namespace directory: %w", err))
 
@@ -534,7 +539,7 @@ func (c *Catalog) ListTables(_ context.Context, ns table.Identifier) iter.Seq2[t
 			}
 
 			child := filepath.Join(nsPath, e.Name())
-			if !isTableDir(child) {
+			if !isTableDir(c.filesystem, child) {
 				continue
 			}
 
@@ -554,11 +559,26 @@ func (c *Catalog) DropTable(_ context.Context, ident table.Identifier) error {
 	}
 
 	tablePath := c.tableToPath(ident)
-	if !isTableDir(tablePath) {
+	if !isTableDir(c.filesystem, tablePath) {
 		return fmt.Errorf("%w: %s", catalog.ErrNoSuchTable, strings.Join(ident, "."))
 	}
 
-	return os.RemoveAll(tablePath)
+	return c.filesystem.RemoveAll(tablePath)
+}
+
+func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) error {
+	tbl, err := c.LoadTable(ctx, identifier)
+	if err != nil {
+		return err
+	}
+
+	// For Hadoop catalog, physical files walk must run BEFORE deleting the table directory root
+	if purgeErr := tbl.PurgeFiles(ctx); purgeErr != nil {
+		log.Printf("WARNING: failing to purge some files in Hadoop table %s: %v", identifier, purgeErr)
+	}
+
+	// Delete the table directory root from the local storage
+	return c.DropTable(ctx, identifier)
 }
 
 func (c *Catalog) RenameTable(_ context.Context, _, _ table.Identifier) (*table.Table, error) {
@@ -576,7 +596,7 @@ func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props 
 
 	path := c.namespaceToPath(ns)
 
-	if err := os.Mkdir(path, 0o755); err != nil {
+	if err := c.filesystem.Mkdir(path); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("%w: %s", catalog.ErrNamespaceAlreadyExists, strings.Join(ns, "."))
 		}
@@ -599,7 +619,7 @@ func (c *Catalog) DropNamespace(_ context.Context, ns table.Identifier) error {
 
 	path := c.namespaceToPath(ns)
 
-	entries, err := os.ReadDir(path)
+	entries, err := c.filesystem.ReadDir(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
@@ -612,7 +632,7 @@ func (c *Catalog) DropNamespace(_ context.Context, ns table.Identifier) error {
 		return fmt.Errorf("%w: %s", catalog.ErrNamespaceNotEmpty, strings.Join(ns, "."))
 	}
 
-	return os.Remove(path)
+	return c.filesystem.Remove(path)
 }
 
 func (c *Catalog) CheckNamespaceExists(_ context.Context, ns table.Identifier) (bool, error) {
@@ -622,7 +642,7 @@ func (c *Catalog) CheckNamespaceExists(_ context.Context, ns table.Identifier) (
 
 	path := c.namespaceToPath(ns)
 
-	info, err := os.Stat(path)
+	info, err := c.filesystem.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
 	}
@@ -648,13 +668,13 @@ func (c *Catalog) ListNamespaces(_ context.Context, parent table.Identifier) ([]
 	} else {
 		path = c.namespaceToPath(parent)
 
-		info, err := os.Stat(path)
+		info, err := c.filesystem.Stat(path)
 		if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()) {
 			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(parent, "."))
 		}
 	}
 
-	entries, err := os.ReadDir(path)
+	entries, err := c.filesystem.ReadDir(path)
 	if err != nil {
 		return nil, fmt.Errorf("hadoop catalog: failed to read directory: %w", err)
 	}
@@ -666,7 +686,7 @@ func (c *Catalog) ListNamespaces(_ context.Context, parent table.Identifier) ([]
 		}
 
 		child := filepath.Join(path, e.Name())
-		if isTableDir(child) {
+		if isTableDir(c.filesystem, child) {
 			continue
 		}
 
@@ -686,7 +706,7 @@ func (c *Catalog) LoadNamespaceProperties(_ context.Context, ns table.Identifier
 
 	path := c.namespaceToPath(ns)
 
-	info, err := os.Stat(path)
+	info, err := c.filesystem.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()) {
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
 	}

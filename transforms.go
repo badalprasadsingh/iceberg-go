@@ -30,9 +30,9 @@ import (
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/iceberg-go/internal"
 	"github.com/google/uuid"
 	"github.com/twmb/murmur3"
-	"golang.org/x/exp/constraints"
 )
 
 // ParseTransform takes the string representation of a transform as
@@ -47,7 +47,10 @@ func ParseTransform(s string) (Transform, error) {
 			break
 		}
 
-		n, _ := strconv.Atoi(matches[1])
+		n, err := strconv.Atoi(matches[1])
+		if err != nil || n <= 0 || n > math.MaxInt32 {
+			break
+		}
 
 		return BucketTransform{NumBuckets: n}, nil
 	case strings.HasPrefix(s, "truncate"):
@@ -56,7 +59,10 @@ func ParseTransform(s string) (Transform, error) {
 			break
 		}
 
-		n, _ := strconv.Atoi(matches[1])
+		n, err := strconv.Atoi(matches[1])
+		if err != nil || n <= 0 || n > math.MaxInt32 {
+			break
+		}
 
 		return TruncateTransform{Width: n}, nil
 	default:
@@ -107,6 +113,10 @@ func (t IdentityTransform) MarshalText() ([]byte, error) {
 func (IdentityTransform) String() string { return "identity" }
 
 func (IdentityTransform) CanTransform(t Type) bool {
+	switch t.(type) {
+	case GeometryType, GeographyType:
+		return false
+	}
 	_, ok := t.(PrimitiveType)
 
 	return ok
@@ -562,19 +572,6 @@ type TimeTransform interface {
 	Transformer(Type) (func(any) Optional[int32], error)
 }
 
-// floorDiv performs floored integer division, rounding toward negative infinity.
-// Unlike Go's truncated division (which rounds toward zero), this correctly
-// handles negative dividends — e.g., floorDiv(-1, 3600000000) = -1, not 0.
-// This matches the behavior of Java's Math.floorDiv.
-func floorDiv[T constraints.Integer](a, b T) T {
-	d := a / b
-	if (a^b) < 0 && d*b != a {
-		d--
-	}
-
-	return d
-}
-
 func canTransformTime(t TimeTransform, sourceType Type) bool {
 	switch sourceType.(type) {
 	case DateType, TimestampType, TimestampTzType, TimestampNsType, TimestampTzNsType:
@@ -653,6 +650,17 @@ func (YearTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 				Val:   int32(v.(Timestamp).ToTime().Year() - epochTM.Year()),
 			}
 		}, nil
+	case TimestampNsType, TimestampTzNsType:
+		return func(v any) Optional[int32] {
+			if v == nil {
+				return Optional[int32]{}
+			}
+
+			return Optional[int32]{
+				Valid: true,
+				Val:   int32(v.(TimestampNano).ToTime().Year() - epochTM.Year()),
+			}
+		}, nil
 	}
 
 	return nil, fmt.Errorf("%w: cannot apply year transform for type %s",
@@ -671,6 +679,9 @@ func (YearTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	case TimestampLiteral:
 		out.Valid = true
 		out.Val = Int32Literal(Timestamp(v).ToTime().Year() - epochTM.Year())
+	case TimestampNsLiteral:
+		out.Valid = true
+		out.Val = Int32Literal(TimestampNano(v).ToTime().Year() - epochTM.Year())
 	}
 
 	return out
@@ -736,6 +747,19 @@ func (MonthTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 				Val:   int32((d.Year()-epochTM.Year())*12 + (int(d.Month()) - int(epochTM.Month()))),
 			}
 		}, nil
+	case TimestampNsType, TimestampTzNsType:
+		return func(v any) Optional[int32] {
+			if v == nil {
+				return Optional[int32]{}
+			}
+
+			d := v.(TimestampNano).ToTime()
+
+			return Optional[int32]{
+				Valid: true,
+				Val:   int32((d.Year()-epochTM.Year())*12 + (int(d.Month()) - int(epochTM.Month()))),
+			}
+		}, nil
 
 	}
 
@@ -754,6 +778,8 @@ func (MonthTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 		tm = Date(v).ToTime()
 	case TimestampLiteral:
 		tm = Timestamp(v).ToTime()
+	case TimestampNsLiteral:
+		tm = TimestampNano(v).ToTime()
 	default:
 		return out
 	}
@@ -789,7 +815,7 @@ func (t DayTransform) MarshalText() ([]byte, error) {
 func (DayTransform) String() string { return "day" }
 
 func (t DayTransform) CanTransform(sourceType Type) bool { return canTransformTime(t, sourceType) }
-func (DayTransform) ResultType(Type) Type                { return PrimitiveTypes.Int32 }
+func (DayTransform) ResultType(Type) Type                { return PrimitiveTypes.Date }
 func (DayTransform) PreservesOrder() bool                { return true }
 
 func (DayTransform) Equals(other Transform) bool {
@@ -909,7 +935,7 @@ func (HourTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 
 			return Optional[int32]{
 				Valid: true,
-				Val:   int32(floorDiv(int64(v.(Timestamp)), factor)),
+				Val:   int32(internal.FloorDiv(int64(v.(Timestamp)), factor)),
 			}
 		}, nil
 	case TimestampNsType, TimestampTzNsType:
@@ -922,7 +948,7 @@ func (HourTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 
 			return Optional[int32]{
 				Valid: true,
-				Val:   int32(floorDiv(int64(v.(TimestampNano)), factor)),
+				Val:   int32(internal.FloorDiv(int64(v.(TimestampNano)), factor)),
 			}
 		}, nil
 	}
@@ -939,10 +965,10 @@ func (HourTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	switch v := value.Val.(type) {
 	case TimestampLiteral:
 		const factor = int64(time.Hour / time.Microsecond)
-		out.Valid, out.Val = true, Int32Literal(int32(floorDiv(int64(v), factor)))
+		out.Valid, out.Val = true, Int32Literal(int32(internal.FloorDiv(int64(v), factor)))
 	case TimestampNsLiteral:
 		const factor = int64(time.Hour)
-		out.Valid, out.Val = true, Int32Literal(int32(floorDiv(int64(v), factor)))
+		out.Valid, out.Val = true, Int32Literal(int32(internal.FloorDiv(int64(v), factor)))
 	}
 
 	return out
@@ -1005,6 +1031,8 @@ func transformLiteral[T LiteralType](fn func(any) Optional[T], lit Literal) Lite
 		return NewLiteral(fn(Time(l)).Val)
 	case TimestampLiteral:
 		return NewLiteral(fn(Timestamp(l)).Val)
+	case TimestampNsLiteral:
+		return NewLiteral(fn(TimestampNano(l)).Val)
 	case StringLiteral:
 		return NewLiteral(fn(string(l)).Val)
 	case FixedLiteral:

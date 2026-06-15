@@ -46,7 +46,8 @@ import (
 // Subcommand structs
 
 type ListCmd struct {
-	Parent string `arg:"positional" help:"catalog parent namespace"`
+	Parent   string `arg:"positional" help:"catalog parent namespace"`
+	PageSize int    `arg:"--page-size" help:"page size for paginated list requests (REST catalog only); 0 uses the catalog default"`
 }
 
 type DescribeCmd struct {
@@ -112,6 +113,7 @@ type DropNamespaceCmd struct {
 
 type DropTableCmd struct {
 	Identifier string `arg:"positional,required" help:"fully qualified table"`
+	Purge      bool   `arg:"--purge" help:"physically delete all table files"`
 }
 
 type DropCmd struct {
@@ -253,10 +255,10 @@ func main() {
 	case args.Compact != nil && args.Compact.Analyze == nil && args.Compact.Run == nil:
 		_ = parser.WriteHelpForSubcommand(os.Stderr, "compact")
 		os.Exit(1)
-	case args.Branch != nil && args.Branch.Create == nil:
+	case args.Branch != nil && args.Branch.Create == nil && args.Branch.Delete == nil:
 		_ = parser.WriteHelpForSubcommand(os.Stderr, "branch")
 		os.Exit(1)
-	case args.Tag != nil && args.Tag.Create == nil:
+	case args.Tag != nil && args.Tag.Create == nil && args.Tag.Delete == nil:
 		_ = parser.WriteHelpForSubcommand(os.Stderr, "tag")
 		os.Exit(1)
 	}
@@ -271,11 +273,20 @@ func main() {
 		log.Fatal("unimplemented output type")
 	}
 
+	// Validate the rollback selector before catalog init so invalid flags fail
+	// fast with a clear message instead of a catalog connection error.
+	if args.Rollback != nil {
+		if err := validateRollbackSelector(args.Rollback); err != nil {
+			output.Error(err)
+			os.Exit(1)
+		}
+	}
+
 	cat := initCatalog(ctx, args)
 
 	switch {
 	case args.List != nil:
-		list(ctx, output, cat, args.List.Parent)
+		list(ctx, output, cat, args.List.Parent, args.List.PageSize)
 	case args.Describe != nil:
 		runDescribe(ctx, output, cat, args.Describe)
 	case args.Schema != nil:
@@ -534,13 +545,24 @@ func runDrop(ctx context.Context, output Output, cat catalog.Catalog, cmd *DropC
 		err := cat.DropNamespace(ctx, catalog.ToIdentifier(cmd.Namespace.Identifier))
 		if err != nil {
 			output.Error(err)
-			os.Exit(1)
+			osExit(1)
 		}
 	case cmd.Table != nil:
-		err := cat.DropTable(ctx, catalog.ToIdentifier(cmd.Table.Identifier))
+		ident := catalog.ToIdentifier(cmd.Table.Identifier)
+		var err error
+		if cmd.Table.Purge {
+			if purger, ok := cat.(catalog.PurgeableTable); ok {
+				err = purger.PurgeTable(ctx, ident)
+			} else {
+				output.Error(fmt.Errorf("catalog %s does not support purge", cat.CatalogType()))
+				osExit(1)
+			}
+		} else {
+			err = cat.DropTable(ctx, ident)
+		}
 		if err != nil {
 			output.Error(err)
-			os.Exit(1)
+			osExit(1)
 		}
 	}
 }
@@ -670,8 +692,19 @@ func runCompact(ctx context.Context, output Output, cat catalog.Catalog, cmd *Co
 	}
 }
 
-func list(ctx context.Context, output Output, cat catalog.Catalog, parent string) {
+func list(ctx context.Context, output Output, cat catalog.Catalog, parent string, pageSize int) {
 	prnt := catalog.ToIdentifier(parent)
+
+	if pageSize < 0 {
+		output.Error(fmt.Errorf("--page-size must be non-negative, got %d", pageSize))
+		os.Exit(1)
+	}
+
+	if pageSize > 0 {
+		if rc, ok := cat.(*rest.Catalog); ok {
+			ctx = rc.SetPageSize(ctx, pageSize)
+		}
+	}
 
 	var ids []table.Identifier
 

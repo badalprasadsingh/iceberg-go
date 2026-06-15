@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"log"
 	"maps"
 	"strings"
 	_ "unsafe"
@@ -48,6 +49,8 @@ func init() {
 		return NewCatalog(props)
 	}))
 }
+
+var _ catalog.PurgeableTable = (*Catalog)(nil)
 
 type Catalog struct {
 	client HiveClient
@@ -175,17 +178,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	afs, err := staged.FS(ctx)
-	if err != nil {
-		return nil, err
-	}
-	wfs, ok := afs.(io.WriteFileIO)
-	if !ok {
-		return nil, errors.New("loaded filesystem IO does not support writing")
-	}
-
-	compression := staged.Table.Properties().Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
-	if err := internal.WriteTableMetadata(staged.Metadata(), wfs, staged.MetadataLocation(), compression); err != nil {
+	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
 		return nil, err
 	}
 
@@ -391,6 +384,26 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 	return nil
 }
 
+func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) error {
+	tbl, err := c.LoadTable(ctx, identifier)
+	if err != nil {
+		return err
+	}
+
+	// Drop the table entry from the catalog first
+	err = c.DropTable(ctx, identifier)
+	if err != nil {
+		return err
+	}
+
+	// Physically delete all table files on storage best-effort
+	if purgeErr := tbl.PurgeFiles(ctx); purgeErr != nil {
+		log.Printf("WARNING: dropped table %s but failed to purge files: %v", identifier, purgeErr)
+	}
+
+	return nil
+}
+
 func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
 	fromDB, fromTable, err := identifierToTableName(from)
 	if err != nil {
@@ -460,7 +473,7 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 		}
 	}
 
-	staged, err := internal.UpdateAndStageTable(ctx, current, identifier, requirements, updates, c)
+	staged, err := internal.UpdateAndStageTable(ctx, c.opts.props, current, identifier, requirements, updates, c)
 	if err != nil {
 		return nil, "", err
 	}
@@ -469,7 +482,7 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 		return current.Metadata(), current.MetadataLocation(), nil
 	}
 
-	if err := internal.WriteMetadata(ctx, staged.Metadata(), staged.MetadataLocation(), staged.Properties()); err != nil {
+	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
 		return nil, "", err
 	}
 

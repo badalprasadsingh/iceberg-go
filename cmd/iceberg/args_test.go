@@ -49,6 +49,23 @@ func TestArgsParsing(t *testing.T) {
 			},
 		},
 		{
+			name: "list with page-size",
+			args: []string{"list", "prod.db", "--page-size", "100"},
+			check: func(t *testing.T, a Args) {
+				require.NotNil(t, a.List)
+				assert.Equal(t, "prod.db", a.List.Parent)
+				assert.Equal(t, 100, a.List.PageSize)
+			},
+		},
+		{
+			name: "list defaults page-size to zero",
+			args: []string{"list"},
+			check: func(t *testing.T, a Args) {
+				require.NotNil(t, a.List)
+				assert.Equal(t, 0, a.List.PageSize)
+			},
+		},
+		{
 			name: "describe direct identifier",
 			args: []string{"describe", "prod.db.events"},
 			check: func(t *testing.T, a Args) {
@@ -143,6 +160,17 @@ func TestArgsParsing(t *testing.T) {
 				require.NotNil(t, a.Drop)
 				require.NotNil(t, a.Drop.Table)
 				assert.Equal(t, "prod.db.events", a.Drop.Table.Identifier)
+				assert.False(t, a.Drop.Table.Purge)
+			},
+		},
+		{
+			name: "drop table with --purge",
+			args: []string{"drop", "table", "prod.db.events", "--purge"},
+			check: func(t *testing.T, a Args) {
+				require.NotNil(t, a.Drop)
+				require.NotNil(t, a.Drop.Table)
+				assert.Equal(t, "prod.db.events", a.Drop.Table.Identifier)
+				assert.True(t, a.Drop.Table.Purge)
 			},
 		},
 		{
@@ -197,6 +225,28 @@ func TestArgsParsing(t *testing.T) {
 				assert.Equal(t, "json", a.Output)
 				assert.Equal(t, "s3://wh", a.Warehouse)
 				require.NotNil(t, a.List)
+			},
+		},
+		{
+			name: "rollback with snapshot id",
+			args: []string{"rollback", "prod.db.events", "--snapshot-id", "123", "--yes"},
+			check: func(t *testing.T, a Args) {
+				require.NotNil(t, a.Rollback)
+				assert.Equal(t, "prod.db.events", a.Rollback.TableID)
+				require.NotNil(t, a.Rollback.SnapshotID)
+				assert.Equal(t, int64(123), *a.Rollback.SnapshotID)
+				assert.Equal(t, "", a.Rollback.Timestamp)
+				assert.True(t, a.Rollback.Yes)
+			},
+		},
+		{
+			name: "rollback with timestamp",
+			args: []string{"rollback", "prod.db.events", "--timestamp", "2026-01-15T03:00:00Z"},
+			check: func(t *testing.T, a Args) {
+				require.NotNil(t, a.Rollback)
+				assert.Equal(t, "prod.db.events", a.Rollback.TableID)
+				assert.Nil(t, a.Rollback.SnapshotID)
+				assert.Equal(t, "2026-01-15T03:00:00Z", a.Rollback.Timestamp)
 			},
 		},
 		{

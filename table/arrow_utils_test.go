@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
@@ -90,6 +92,7 @@ func TestArrowToIceberg(t *testing.T) {
 		{arrow.BinaryTypes.LargeBinary, iceberg.PrimitiveTypes.Binary, false, ""},
 		{arrow.BinaryTypes.BinaryView, nil, false, "unsupported arrow type for conversion - binary_view"},
 		{extensions.NewUUIDType(), iceberg.PrimitiveTypes.UUID, true, ""},
+		{extensions.NewDefaultVariantType(), iceberg.VariantType{}, true, ""},
 		{arrow.StructOf(arrow.Field{
 			Name:     "foo",
 			Type:     arrow.BinaryTypes.String,
@@ -364,6 +367,132 @@ func TestArrowSchemaRoundTripConversion(t *testing.T) {
 	}
 }
 
+func TestVariantArrowConversion(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.VariantType{}},
+	)
+
+	t.Run("round trip with field ids", func(t *testing.T) {
+		arrowSc, err := table.SchemaToArrowSchema(sc, nil, true, false)
+		require.NoError(t, err)
+
+		assert.Equal(t, 2, arrowSc.NumFields())
+
+		dataField := arrowSc.Field(1)
+		ext, ok := dataField.Type.(arrow.ExtensionType)
+		require.True(t, ok, "expected extension type, got %T", dataField.Type)
+		assert.Equal(t, "parquet.variant", ext.ExtensionName())
+
+		ice, err := table.ArrowSchemaToIceberg(arrowSc, false, nil)
+		require.NoError(t, err)
+		assert.True(t, ice.Field(1).Type.Equals(iceberg.VariantType{}))
+		assert.True(t, ice.Field(0).Type.Equals(iceberg.PrimitiveTypes.Timestamp))
+	})
+
+	t.Run("large binary storage", func(t *testing.T) {
+		arrowSc, err := table.SchemaToArrowSchema(sc, nil, true, true)
+		require.NoError(t, err)
+
+		dataField := arrowSc.Field(1)
+		ext, ok := dataField.Type.(arrow.ExtensionType)
+		require.True(t, ok)
+
+		st, ok := ext.StorageType().(*arrow.StructType)
+		require.True(t, ok, "expected struct storage type, got %T", ext.StorageType())
+		assert.Equal(t, "metadata", st.Field(0).Name)
+		assert.Equal(t, "value", st.Field(1).Name)
+		assert.Equal(t, arrow.BinaryTypes.LargeBinary, st.Field(0).Type)
+		assert.Equal(t, arrow.BinaryTypes.LargeBinary, st.Field(1).Type)
+	})
+
+	t.Run("multiple variant columns", func(t *testing.T) {
+		multiSc := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+			iceberg.NestedField{ID: 2, Name: "v1", Type: iceberg.VariantType{}},
+			iceberg.NestedField{ID: 3, Name: "v2", Type: iceberg.VariantType{}},
+		)
+
+		arrowSc, err := table.SchemaToArrowSchema(multiSc, nil, true, false)
+		require.NoError(t, err)
+		assert.Equal(t, 3, arrowSc.NumFields())
+
+		for _, idx := range []int{1, 2} {
+			ext, ok := arrowSc.Field(idx).Type.(arrow.ExtensionType)
+			require.True(t, ok, "field %d should be extension type", idx)
+			assert.Equal(t, "parquet.variant", ext.ExtensionName())
+		}
+
+		ice, err := table.ArrowSchemaToIceberg(arrowSc, false, nil)
+		require.NoError(t, err)
+		assert.True(t, ice.Field(1).Type.Equals(iceberg.VariantType{}))
+		assert.True(t, ice.Field(2).Type.Equals(iceberg.VariantType{}))
+	})
+}
+
+func TestVariantArrayBuilderLargeValues(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	bldr := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer bldr.Release()
+
+	mkVariant := func(v any) variant.Value {
+		var b variant.Builder
+		require.NoError(t, b.Append(v))
+		val, err := b.Build()
+		require.NoError(t, err)
+
+		return val
+	}
+
+	const arrayLen = 300
+	elems := make([]any, arrayLen)
+	for i := range elems {
+		elems[i] = int64(i)
+	}
+	bldr.Append(mkVariant(elems))
+
+	const objFields = 40
+	obj := make(map[string]any, objFields)
+	for i := 0; i < objFields; i++ {
+		obj["k"+strconv.Itoa(i)] = int64(i)
+	}
+	bldr.Append(mkVariant(obj))
+
+	arr := bldr.NewArray()
+	defer arr.Release()
+
+	varr, ok := arr.(*extensions.VariantArray)
+	require.True(t, ok)
+	require.Equal(t, 2, varr.Len())
+
+	v0, err := varr.Value(0)
+	require.NoError(t, err)
+	require.NotEmpty(t, v0.Bytes())
+
+	v1, err := varr.Value(1)
+	require.NoError(t, err)
+	require.NotEmpty(t, v1.Bytes())
+}
+
+func TestVariantProjectionExclusion(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+
+	projected, err := iceberg.PruneColumns(sc, map[int]iceberg.Void{1: {}}, false)
+	require.NoError(t, err)
+	assert.Equal(t, 1, projected.NumFields())
+	assert.Equal(t, "id", projected.Field(0).Name)
+
+	arrowSc, err := table.SchemaToArrowSchema(projected, nil, true, false)
+	require.NoError(t, err)
+	assert.Equal(t, 1, arrowSc.NumFields())
+	assert.Equal(t, "id", arrowSc.Field(0).Name)
+}
+
 func TestArrowSchemaWithNameMapping(t *testing.T) {
 	schemaWithoutIDs := arrow.NewSchema([]arrow.Field{
 		{Name: "foo", Type: arrow.BinaryTypes.String, Nullable: true},
@@ -552,6 +681,64 @@ func TestToRequestedSchemaTimestamps(t *testing.T) {
 			assert.True(t, array.Equal(expected, convertedCol), "expected: %s\ngot: %s", expected, convertedCol)
 			expected.Release()
 		}
+	}
+}
+
+func TestToRequestedSchemaTimestampDowncastFloorsNegativeNanoseconds(t *testing.T) {
+	tests := []struct {
+		name         string
+		sourceArrow  *arrow.TimestampType
+		sourceType   iceberg.Type
+		requested    iceberg.Type
+		expectedType *arrow.TimestampType
+	}{
+		{
+			name:         "timestamp",
+			sourceArrow:  &arrow.TimestampType{Unit: arrow.Nanosecond},
+			sourceType:   iceberg.PrimitiveTypes.TimestampNs,
+			requested:    iceberg.PrimitiveTypes.Timestamp,
+			expectedType: &arrow.TimestampType{Unit: arrow.Microsecond},
+		},
+		{
+			name:         "timestamptz",
+			sourceArrow:  &arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: "UTC"},
+			sourceType:   iceberg.PrimitiveTypes.TimestampTzNs,
+			requested:    iceberg.PrimitiveTypes.TimestampTz,
+			expectedType: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			defer mem.AssertSize(t, 0)
+
+			arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "ts", Type: tt.sourceArrow, Nullable: true}}, nil)
+			bldr := array.NewRecordBuilder(mem, arrowSchema)
+			defer bldr.Release()
+			bldr.Field(0).(*array.TimestampBuilder).Append(arrow.Timestamp(-1_500))
+
+			rec := bldr.NewRecordBatch()
+			defer rec.Release()
+
+			requested := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "ts", Type: tt.requested, Required: false},
+			)
+			fileSchema := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "ts", Type: tt.sourceType, Required: false},
+			)
+
+			converted, err := table.ToRequestedSchema(ctx, requested, fileSchema, rec, table.SchemaOptions{
+				DowncastTimestamp: true,
+			})
+			require.NoError(t, err)
+			defer converted.Release()
+
+			col := converted.Column(0).(*array.Timestamp)
+			require.True(t, arrow.TypeEqual(tt.expectedType, col.DataType()))
+			assert.Equal(t, arrow.Timestamp(-2), col.Value(0))
+		})
 	}
 }
 
@@ -1705,4 +1892,64 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 			tt.check(t, result.Column(1))
 		})
 	}
+}
+
+func TestToRequestedSchemaMissingNestedFieldID(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	// Create an Arrow schema that lacks the nested list completely
+	schemaWithoutMetadata := arrow.NewSchema([]arrow.Field{
+		{
+			Name: "other_field", Type: arrow.PrimitiveTypes.Int32,
+		},
+	}, nil)
+
+	bldr := array.NewRecordBuilder(mem, schemaWithoutMetadata)
+	defer bldr.Release()
+
+	const data = `{"other_field": 1}
+				  {"other_field": 2}`
+
+	s := bufio.NewScanner(strings.NewReader(data))
+	for s.Scan() {
+		require.NoError(t, bldr.UnmarshalJSON(s.Bytes()))
+	}
+
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	// The file schema lacks the nested_list
+	fileIcesc := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 10, Name: "other_field", Type: iceberg.PrimitiveTypes.Int32, Required: false,
+	})
+
+	// The requested schema has the nested_list
+	reqIcesc := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 10, Name: "other_field", Type: iceberg.PrimitiveTypes.Int32, Required: false,
+	}, iceberg.NestedField{
+		ID: 11, Name: "nested_list", Type: &iceberg.ListType{
+			ElementID: 12, Element: iceberg.PrimitiveTypes.String, ElementRequired: false,
+		}, Required: false,
+	})
+
+	rec2, err := table.ToRequestedSchema(context.Background(), reqIcesc, fileIcesc, rec, table.SchemaOptions{IncludeFieldIDs: true})
+	require.NoError(t, err)
+	defer rec2.Release()
+
+	targetSchema := arrow.NewSchema([]arrow.Field{
+		{
+			Name: "other_field", Type: arrow.PrimitiveTypes.Int32, Nullable: true,
+			Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "10"}),
+		},
+		{
+			Name: "nested_list", Type: arrow.ListOfField(arrow.Field{
+				Name: "element", Type: arrow.BinaryTypes.String, Nullable: true,
+				Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "12"}),
+			}),
+			Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "11"}),
+			Nullable: true,
+		},
+	}, nil)
+	require.True(t, targetSchema.Equal(rec2.Schema()), "Schema is not perfectly equal")
 }

@@ -18,6 +18,7 @@
 package table
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -661,8 +662,12 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 			if err != nil {
 				return nil, nil, err
 			}
+			mappingJSON, err := json.Marshal(updatedNameMapping)
+			if err != nil {
+				return nil, nil, err
+			}
 			updates = append(updates, NewSetPropertiesUpdate(iceberg.Properties{
-				DefaultNameMappingKey: updatedNameMapping.String(),
+				DefaultNameMappingKey: string(mappingJSON),
 			}))
 		}
 	}
@@ -879,6 +884,10 @@ func (a *applyChanges) Map(mapType iceberg.MapType, keyResult, valueResult icebe
 
 func (a *applyChanges) Primitive(primitive iceberg.PrimitiveType) iceberg.Type {
 	return primitive
+}
+
+func (a *applyChanges) Variant(variant iceberg.VariantType) iceberg.Type {
+	return variant
 }
 
 func addFields(fields []iceberg.NestedField, adds []iceberg.NestedField) []iceberg.NestedField {

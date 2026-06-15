@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -39,10 +40,6 @@ import (
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/s3blob"
 )
-
-var unsupportedS3Props = []string{
-	io.S3ConnectTimeout,
-}
 
 // ParseAWSConfig parses S3 properties and returns a configuration.
 func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, error) {
@@ -85,6 +82,7 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 	}
 
 	opts := []func(*config.LoadOptions) error{}
+	var httpClient *awshttp.BuildableClient
 
 	if tok, ok := props["token"]; ok {
 		opts = append(opts, config.WithBearerAuthTokenProvider(
@@ -107,14 +105,32 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 	if proxy, ok := props[io.S3ProxyURI]; ok {
 		proxyURL, err := url.Parse(proxy)
 		if err != nil {
-			return nil, fmt.Errorf("invalid s3 proxy url '%s'", proxy)
+			return nil, fmt.Errorf("invalid s3 proxy url %q: %w", proxy, err)
 		}
 
-		opts = append(opts, config.WithHTTPClient(awshttp.NewBuildableClient().WithTransportOptions(
+		httpClient = newS3BuildableClient().WithTransportOptions(
 			func(t *http.Transport) {
 				t.Proxy = http.ProxyURL(proxyURL)
 			},
-		)))
+		)
+	}
+
+	if timeout, ok := props[io.S3ConnectTimeout]; ok {
+		duration, err := parseS3ConnectTimeout(timeout)
+		if err != nil {
+			return nil, err
+		}
+
+		if httpClient == nil {
+			httpClient = newS3BuildableClient()
+		}
+		httpClient = httpClient.WithDialerOptions(func(d *net.Dialer) {
+			d.Timeout = duration
+		})
+	}
+
+	if httpClient != nil {
+		opts = append(opts, config.WithHTTPClient(httpClient))
 	}
 
 	awscfg := new(aws.Config)
@@ -125,6 +141,47 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 	}
 
 	return awscfg, nil
+}
+
+func parseS3ConnectTimeout(timeout string) (time.Duration, error) {
+	var duration time.Duration
+	if seconds, err := strconv.ParseFloat(timeout, 64); err == nil {
+		duration = time.Duration(seconds * float64(time.Second))
+	} else {
+		parsedDuration, err := time.ParseDuration(timeout)
+		if err != nil {
+			return 0, fmt.Errorf("invalid s3.connect-timeout %q: must be seconds as a number or a Go duration string", timeout)
+		}
+		duration = parsedDuration
+	}
+
+	if duration <= 0 {
+		return 0, errors.New("s3.connect-timeout must be a positive duration")
+	}
+
+	return duration, nil
+}
+
+// S3 transport tuning shared by all S3 BuildableClient paths.
+const (
+	s3MaxIdleConns        = 256
+	s3MaxIdleConnsPerHost = 256
+	s3MaxConnsPerHost     = 2048
+	s3IdleConnTimeout     = 90 * time.Second
+)
+
+// newS3BuildableClient returns an AWS buildable HTTP client with the S3
+// transport tuning applied. Subsequent WithTransportOptions/WithDialerOptions
+// calls preserve this tuning, since the builder clones the transport forward.
+func newS3BuildableClient() *awshttp.BuildableClient {
+	return awshttp.NewBuildableClient().WithTransportOptions(applyS3TransportTuning)
+}
+
+func applyS3TransportTuning(t *http.Transport) {
+	t.MaxIdleConns = s3MaxIdleConns
+	t.MaxIdleConnsPerHost = s3MaxIdleConnsPerHost
+	t.MaxConnsPerHost = s3MaxConnsPerHost
+	t.IdleConnTimeout = s3IdleConnTimeout
 }
 
 // resolveUsePathStyle determines whether the S3 client should use
@@ -157,17 +214,10 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 	}
 
 	// Default HTTP client when not configured: use the SDK buildable client so
-	// proxy, TLS, dial, and HTTP/2 behavior match the usual AWS defaults, but
-	// raise per-host idle limits (Go's DefaultTransport uses 2 per host).
+	// proxy, TLS, dial, and HTTP/2 behavior match the usual AWS defaults, with
+	// the S3 transport tuning applied (see applyS3TransportTuning).
 	if awscfg.HTTPClient == nil {
-		awscfg.HTTPClient = awshttp.NewBuildableClient().WithTransportOptions(
-			func(t *http.Transport) {
-				t.MaxIdleConns = 256
-				t.MaxIdleConnsPerHost = 256
-				t.MaxConnsPerHost = 256
-				t.IdleConnTimeout = 90 * time.Second
-			},
-		)
+		awscfg.HTTPClient = newS3BuildableClient()
 	}
 
 	endpoint, ok := props[io.S3EndpointURL]

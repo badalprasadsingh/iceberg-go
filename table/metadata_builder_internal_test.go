@@ -18,14 +18,17 @@
 package table
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1412,6 +1415,8 @@ func TestUnsupportedTypes(t *testing.T) {
 	TestTypes := []iceberg.Type{
 		iceberg.TimestampNsType{},
 		iceberg.TimestampTzNsType{},
+		iceberg.GeometryType{},
+		iceberg.GeographyType{},
 	}
 	for _, typ := range TestTypes {
 		for unsupportedVersion := 1; unsupportedVersion < minFormatVersionForType(typ); unsupportedVersion++ {
@@ -1838,6 +1843,240 @@ func TestUnknownTypeValidation(t *testing.T) {
 		require.Error(t, err, "should error when unknown type is used as map value")
 		require.ErrorContains(t, err, "must be optional")
 	})
+}
+
+func TestMetadataBuilderNameMapping(t *testing.T) {
+	idPtr := func(v int) *int { return &v }
+
+	nested := iceberg.NameMapping{
+		{FieldID: idPtr(1), Names: []string{"foo"}},
+		{FieldID: idPtr(2), Names: []string{"bar", "bar_legacy"}},
+		{FieldID: idPtr(3), Names: []string{"location"}, Fields: []iceberg.MappedField{
+			{FieldID: idPtr(4), Names: []string{"element"}, Fields: []iceberg.MappedField{
+				{FieldID: idPtr(5), Names: []string{"latitude"}},
+				{FieldID: idPtr(6), Names: []string{"longitude"}},
+			}},
+		}},
+		{FieldID: idPtr(7), Names: []string{"props"}, Fields: []iceberg.MappedField{
+			{FieldID: idPtr(8), Names: []string{"key"}},
+			{FieldID: idPtr(9), Names: []string{"value"}},
+		}},
+	}
+
+	t.Run("ReturnsNilWhenPropertyMissing", func(t *testing.T) {
+		builder := builderWithoutChanges(2)
+		require.NotContains(t, builder.props, DefaultNameMappingKey)
+		require.Nil(t, builder.NameMapping())
+	})
+
+	t.Run("ReturnsParsedMappingFromValidJSON", func(t *testing.T) {
+		builder := builderWithoutChanges(2)
+		mappingJSON, err := json.Marshal(nested)
+		require.NoError(t, err)
+
+		require.NoError(t, builder.SetProperties(iceberg.Properties{
+			DefaultNameMappingKey: string(mappingJSON),
+		}))
+
+		got := builder.NameMapping()
+		require.NotNil(t, got)
+		require.Equal(t, nested, got)
+	})
+
+	t.Run("RoundTripsThroughBuildAndReload", func(t *testing.T) {
+		builder := builderWithoutChanges(2)
+		mappingJSON, err := json.Marshal(nested)
+		require.NoError(t, err)
+
+		require.NoError(t, builder.SetProperties(iceberg.Properties{
+			DefaultNameMappingKey: string(mappingJSON),
+		}))
+		meta, err := builder.Build()
+		require.NoError(t, err)
+
+		reloaded, err := MetadataBuilderFromBase(meta, "s3://bucket/test/location/metadata/metadata2.json")
+		require.NoError(t, err)
+		require.Equal(t, nested, reloaded.NameMapping())
+	})
+
+	t.Run("ReturnsNilForNonJSONStringRepresentation", func(t *testing.T) {
+		builder := builderWithoutChanges(2)
+		require.NoError(t, builder.SetProperties(iceberg.Properties{
+			DefaultNameMappingKey: nested.String(),
+		}))
+		require.Nil(t, builder.NameMapping())
+	})
+
+	t.Run("ReturnsNilForMalformedJSON", func(t *testing.T) {
+		builder := builderWithoutChanges(2)
+		require.NoError(t, builder.SetProperties(iceberg.Properties{
+			DefaultNameMappingKey: "{not valid json",
+		}))
+		require.Nil(t, builder.NameMapping())
+	})
+}
+
+func TestVariantTypeValidation(t *testing.T) {
+	t.Run("ValidRequiredVariant", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+			iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}, Required: true},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err, "variant can be required per spec")
+	})
+
+	t.Run("ValidOptionalVariant", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+			iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}, Required: false},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err, "variant can be optional")
+	})
+
+	t.Run("InvalidVariantInitialDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}, Required: false, InitialDefault: "invalid"},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err, "variant must have null initial-default")
+		require.ErrorContains(t, err, "must have null initial-default")
+	})
+
+	t.Run("InvalidVariantWriteDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}, Required: false, WriteDefault: "invalid"},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err, "variant must have null write-default")
+		require.ErrorContains(t, err, "must have null write-default")
+	})
+}
+
+func TestGeometryGeographyNullOnlyDefaults(t *testing.T) {
+	testTypes := []struct {
+		name string
+		typ  iceberg.Type
+	}{
+		{"geometry", iceberg.GeometryType{}},
+		{"geography", iceberg.GeographyType{}},
+	}
+
+	for _, tt := range testTypes {
+		t.Run(tt.name+" with non-null initial default", func(t *testing.T) {
+			defaultValue := "POINT(0 0)"
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "location",
+					Required:       false,
+					InitialDefault: &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 3)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "columns must default to null")
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		})
+
+		t.Run(tt.name+" with non-null write default", func(t *testing.T) {
+			defaultValue := "POINT(0 0)"
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:         tt.typ,
+					ID:           1,
+					Name:         "location",
+					Required:     false,
+					WriteDefault: &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 3)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "columns must default to null")
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		})
+
+		t.Run(tt.name+" with null defaults", func(t *testing.T) {
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:     tt.typ,
+					ID:       1,
+					Name:     "location",
+					Required: false,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 3)
+			require.NoError(t, err)
+		})
+
+		t.Run(tt.name+" in v2 type unsupported", func(t *testing.T) {
+			defaultValue := "POINT(0 0)"
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "location",
+					Required:       false,
+					InitialDefault: &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 2)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "is not supported until v3")
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		})
+
+		t.Run(tt.name+" with v3 must default to null", func(t *testing.T) {
+			defaultValue := "POINT(0 0)"
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "location",
+					Required:       false,
+					InitialDefault: &defaultValue,
+					WriteDefault:   &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 3)
+			require.Error(t, err)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+
+			require.ErrorContains(t, err, "invalid initial default")
+			require.ErrorContains(t, err, "invalid write default")
+		})
+
+		t.Run(tt.name+" with both non-null defaults produces exactly two error lines", func(t *testing.T) {
+			defaultValue := "POINT(0 0)"
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "location",
+					Required:       false,
+					InitialDefault: &defaultValue,
+					WriteDefault:   &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 3)
+			require.Error(t, err)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+
+			errStr := err.Error()
+			initialCount := strings.Count(errStr, "invalid initial default")
+			writeCount := strings.Count(errStr, "invalid write default")
+			assert.Equal(t, 1, initialCount, "expected exactly one 'invalid initial default' line, got %d in: %s", initialCount, errStr)
+			assert.Equal(t, 1, writeCount, "expected exactly one 'invalid write default' line, got %d in: %s", writeCount, errStr)
+		})
+	}
 }
 
 func TestComplexTypeDefaultValidation(t *testing.T) {

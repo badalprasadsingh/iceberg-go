@@ -82,6 +82,12 @@ func TestParseTransform(t *testing.T) {
 		{"truncate no val", "truncate[]"},
 		{"bucket neg", "bucket[-1]"},
 		{"truncate neg", "truncate[-1]"},
+		{"bucket zero", "bucket[0]"},
+		{"truncate zero", "truncate[0]"},
+		{"bucket atoi overflow", "bucket[999999999999999999999999999999999999999]"},
+		{"truncate atoi overflow", "truncate[999999999999999999999999999999999999999]"},
+		{"bucket int32 overflow", "bucket[4294967296]"},
+		{"truncate int32 overflow", "truncate[4294967296]"},
 	}
 
 	for _, tt := range errorTests {
@@ -258,6 +264,9 @@ func TestCanTransform(t *testing.T) {
 			},
 			notAllowed: []iceberg.Type{
 				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.VariantType{},
+				iceberg.GeometryType{},
+				iceberg.GeographyType{},
 			},
 		},
 		{
@@ -269,6 +278,9 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.TimestampNs, iceberg.PrimitiveTypes.TimestampTzNs,
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
 				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.VariantType{},
+				iceberg.GeographyType{},
+				iceberg.GeometryType{},
 			},
 			notAllowed: []iceberg.Type{},
 		},
@@ -284,6 +296,9 @@ func TestCanTransform(t *testing.T) {
 			notAllowed: []iceberg.Type{
 				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64,
 				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.VariantType{},
+				iceberg.GeometryType{},
+				iceberg.GeographyType{},
 			},
 		},
 		{
@@ -298,6 +313,9 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.TimestampTz, iceberg.PrimitiveTypes.UUID, iceberg.FixedTypeOf(2),
 				iceberg.PrimitiveTypes.TimestampNs, iceberg.PrimitiveTypes.TimestampTzNs,
 				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.VariantType{},
+				iceberg.GeometryType{},
+				iceberg.GeographyType{},
 			},
 		},
 		{
@@ -311,6 +329,9 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Time,
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
 				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.VariantType{},
+				iceberg.GeographyType{},
+				iceberg.GeometryType{},
 			},
 		},
 		{
@@ -324,6 +345,9 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Time,
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
 				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.VariantType{},
+				iceberg.GeographyType{},
+				iceberg.GeometryType{},
 			},
 		},
 		{
@@ -337,6 +361,9 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Time,
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
 				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.VariantType{},
+				iceberg.GeographyType{},
+				iceberg.GeometryType{},
 			},
 		},
 		{
@@ -351,6 +378,9 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
 				iceberg.PrimitiveTypes.Date, iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2),
 				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.VariantType{},
+				iceberg.GeographyType{},
+				iceberg.GeometryType{},
 			},
 		},
 	}
@@ -361,6 +391,86 @@ func TestCanTransform(t *testing.T) {
 		}
 		for _, typ := range tt.notAllowed {
 			assert.False(t, tt.transform.CanTransform(typ), "%s: expected CanTransform(%T) to be false", tt.transform.String(), typ)
+		}
+	}
+}
+
+func TestYearMonthTransformNanoseconds(t *testing.T) {
+	type testCase struct {
+		name  string
+		ts    iceberg.TimestampNano
+		year  int32
+		month int32
+	}
+
+	values := []testCase{
+		{
+			name:  "post-epoch",
+			ts:    iceberg.TimestampNano(time.Date(2024, time.February, 3, 4, 5, 6, 789_000_000, time.UTC).UnixNano()),
+			year:  54,
+			month: 649,
+		},
+		{
+			name:  "pre-epoch",
+			ts:    iceberg.TimestampNano(-1),
+			year:  -1,
+			month: -1,
+		},
+	}
+
+	tests := []struct {
+		name      string
+		transform iceberg.TimeTransform
+		expected  func(testCase) int32
+	}{
+		{name: "year", transform: iceberg.YearTransform{}, expected: func(tc testCase) int32 { return tc.year }},
+		{name: "month", transform: iceberg.MonthTransform{}, expected: func(tc testCase) int32 { return tc.month }},
+	}
+
+	for _, tt := range tests {
+		for _, tc := range values {
+			t.Run(tt.name+"/"+tc.name+"/Apply", func(t *testing.T) {
+				result := tt.transform.Apply(iceberg.Optional[iceberg.Literal]{
+					Valid: true,
+					Val:   iceberg.NewLiteral(tc.ts),
+				})
+				require.True(t, result.Valid)
+				assert.Equal(t, iceberg.Int32Literal(tt.expected(tc)), result.Val)
+			})
+
+			for _, srcType := range []iceberg.Type{
+				iceberg.PrimitiveTypes.TimestampNs,
+				iceberg.PrimitiveTypes.TimestampTzNs,
+			} {
+				t.Run(tt.name+"/"+tc.name+"/Transformer/"+srcType.String(), func(t *testing.T) {
+					fn, err := tt.transform.Transformer(srcType)
+					require.NoError(t, err)
+
+					result := fn(tc.ts)
+					require.True(t, result.Valid)
+					assert.Equal(t, tt.expected(tc), result.Val)
+				})
+			}
+
+			t.Run(tt.name+"/"+tc.name+"/Project", func(t *testing.T) {
+				schema := iceberg.NewSchema(1, iceberg.NestedField{
+					ID:   1,
+					Name: "ts",
+					Type: iceberg.PrimitiveTypes.TimestampNs,
+				})
+				bound, err := iceberg.GreaterThanEqual(
+					iceberg.Reference("ts"),
+					tc.ts,
+				).Bind(schema, true)
+				require.NoError(t, err)
+
+				projected, err := tt.transform.Project("ts_part", bound.(iceberg.BoundPredicate))
+				require.NoError(t, err)
+				assert.True(t, iceberg.GreaterThanEqual(
+					iceberg.Reference("ts_part"),
+					tt.expected(tc),
+				).Equals(projected))
+			})
 		}
 	}
 }
