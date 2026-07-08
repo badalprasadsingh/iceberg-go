@@ -311,12 +311,6 @@ func TestResolveUsePathStyle(t *testing.T) {
 	}
 }
 
-// TestApplyS3ClientOptionsNoAwsChunked is an end-to-end check that pins the
-// behaviour: when a custom endpoint is configured, a real PutObject through a
-// real s3.Client built with applyS3ClientOptions must NOT carry any of the
-// flexible-checksum / aws-chunked envelope headers, because those break GCS
-// HMAC interop and other S3-compatible servers. This is the load-bearing
-// runtime guarantee behind the GCS upload fix.
 func TestApplyS3ClientOptionsNoAwsChunked(t *testing.T) {
 	t.Parallel()
 
@@ -364,12 +358,6 @@ func TestApplyS3ClientOptionsNoAwsChunked(t *testing.T) {
 			"PutObject must use a precomputed payload hash against custom endpoints, got X-Amz-Content-Sha256=%q", sha)
 	}
 
-	// Amz-Sdk-* are added by the SDK and were signed before our fix.
-	// They must not reach the wire (and therefore must not be in
-	// SignedHeaders either). Accept-Encoding may be re-added by Go's
-	// net/http.Transport for transparent gzip after signing — that's
-	// fine for GCS as long as Accept-Encoding is absent from the signed
-	// canonical request (verified below via the Authorization header).
 	for _, h := range []string{"Amz-Sdk-Invocation-Id", "Amz-Sdk-Request"} {
 		assert.Emptyf(t, captured.Get(h),
 			"PutObject must not include SDK-internal header %s on the wire, got %q", h, captured.Get(h))
@@ -383,13 +371,6 @@ func TestApplyS3ClientOptionsNoAwsChunked(t *testing.T) {
 	}
 }
 
-// TestApplyS3ClientOptionsNoAwsChunkedViaTransferManager exercises the same
-// guarantee as TestApplyS3ClientOptionsNoAwsChunked but via the AWS S3
-// transfer manager (which is the upload path gocloud.dev/blob/s3blob actually
-// uses). The transfer manager unconditionally sets ChecksumAlgorithm = CRC32
-// on every UploadObject input, so this test pins the fact that our
-// applyS3ClientOptions/stripS3InputChecksumAlgorithm pair scrubs it back out
-// before the request leaves the client.
 func TestApplyS3ClientOptionsNoAwsChunkedViaTransferManager(t *testing.T) {
 	t.Parallel()
 
@@ -439,11 +420,6 @@ func TestApplyS3ClientOptionsNoAwsChunkedViaTransferManager(t *testing.T) {
 			"transfer-manager PutObject must use a precomputed payload hash against custom endpoints, got X-Amz-Content-Sha256=%q", sha)
 	}
 
-	// Same guarantees as the bare-client variant: SDK telemetry headers
-	// must not reach the wire and Accept-Encoding must not be in the
-	// signed canonical (its presence in the wire request itself is
-	// harmless because Go's net/http.Transport may add it back after
-	// signing).
 	for _, h := range []string{"Amz-Sdk-Invocation-Id", "Amz-Sdk-Request"} {
 		assert.Emptyf(t, captured.Get(h),
 			"transfer-manager PutObject must not include SDK-internal header %s on the wire, got %q", h, captured.Get(h))
@@ -457,11 +433,6 @@ func TestApplyS3ClientOptionsNoAwsChunkedViaTransferManager(t *testing.T) {
 	}
 }
 
-// TestApplyS3ClientOptionsChecksumMode pins the behaviour that prevents the
-// aws-chunked PutObject regression against non-AWS S3 endpoints (GCS HMAC
-// interop, MinIO, R2). With a custom endpoint set the SDK's flexible
-// checksum feature must be put in WhenRequired mode; without an endpoint
-// (i.e. real AWS S3) the default WhenSupported behaviour must be kept.
 func TestApplyS3ClientOptionsChecksumMode(t *testing.T) {
 	t.Parallel()
 
@@ -492,11 +463,6 @@ func TestApplyS3ClientOptionsChecksumMode(t *testing.T) {
 	})
 }
 
-// TestStripS3InputChecksumAlgorithmMiddleware verifies that the middleware
-// clears ChecksumAlgorithm on the inputs that gocloud's s3blob writer (via
-// the AWS S3 transfer manager) sets to CRC32 by default, and that it runs
-// before the SDK's AWSChecksum:SetupInputContext middleware (the load-bearing
-// ordering requirement — see the comment on stripS3InputChecksumAlgorithm).
 func TestStripS3InputChecksumAlgorithmMiddleware(t *testing.T) {
 	t.Parallel()
 
@@ -532,11 +498,6 @@ func TestStripS3InputChecksumAlgorithmMiddleware(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Build a stack that mimics the real SDK ordering: a sentinel
-			// stand-in for AWSChecksum:SetupInputContext is registered
-			// first, so we can both (a) confirm the strip middleware lands
-			// before it and (b) verify the algorithm has been cleared by
-			// the time SetupInputContext would observe the input.
 			s := smithymiddleware.NewStack("test", smithyhttp.NewStackRequest)
 
 			var sawAlgorithm s3types.ChecksumAlgorithm
