@@ -154,6 +154,10 @@ func applyS3TransportTuning(t *http.Transport) {
 	t.IdleConnTimeout = s3IdleConnTimeout
 }
 
+// resolveUsePathStyle determines whether the S3 client should use
+// path-style addressing. It defaults to virtual-hosted style for
+// standard AWS S3 and path-style for custom endpoints (e.g. MinIO).
+// The s3.force-virtual-addressing property can override either default.
 func applyS3ClientOptions(endpoint string, props map[string]string) func(*s3.Options) {
 	return func(o *s3.Options) {
 		if endpoint != "" {
