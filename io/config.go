@@ -31,7 +31,13 @@ const (
 	S3SignerURI              = "s3.signer.uri"
 	S3RemoteSigningEnabled   = "s3.remote-signing-enabled"
 	S3ForceVirtualAddressing = "s3.force-virtual-addressing"
-	S3ClientRegion           = "client.region"
+	// S3ChecksumEnabled controls whether the S3 client keeps the AWS SDK's
+	// default request checksum calculation and its signing of SDK-internal
+	// headers. It defaults to true. Set it to false for S3-compatible
+	// endpoints that reject those (e.g. Google Cloud Storage's interop
+	// endpoint used with HMAC keys)
+	S3ChecksumEnabled = "s3.checksum-enabled"
+	S3ClientRegion    = "client.region"
 )
 
 // Constants for GCS configuration options

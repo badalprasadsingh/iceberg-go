@@ -154,21 +154,41 @@ func applyS3TransportTuning(t *http.Transport) {
 	t.IdleConnTimeout = s3IdleConnTimeout
 }
 
-// resolveUsePathStyle determines whether the S3 client should use
-// path-style addressing. It defaults to virtual-hosted style for
-// standard AWS S3 and path-style for custom endpoints (e.g. MinIO).
-// The s3.force-virtual-addressing property can override either default.
+// applyS3ClientOptions configures the S3 client. When the s3.checksum-enabled
+// property is false, it applies the compatibility workaround needed by
+// S3-compatible endpoints (such as Google Cloud Storage's interop endpoint
+// used with HMAC keys) that reject the AWS SDK's default request checksums and
+// its signed SDK-internal headers. The property defaults to true, leaving the
+// AWS SDK behavior unchanged, so genuine AWS S3, MinIO, R2, Ceph, and similar
+// backends are unaffected on upgrade.
 func applyS3ClientOptions(endpoint string, props map[string]string) func(*s3.Options) {
 	return func(o *s3.Options) {
 		if endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
-			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
-			o.APIOptions = append(o.APIOptions, stripS3InputChecksumAlgorithm)
-			o.APIOptions = append(o.APIOptions, stripGCSIncompatibleSignedHeaders)
 		}
 		o.UsePathStyle = resolveUsePathStyle(endpoint, props)
+
+		if s3ChecksumEnabled(props) {
+			return
+		}
+
+		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
 		o.DisableLogOutputChecksumValidationSkipped = true
+		o.APIOptions = append(o.APIOptions,
+			stripS3InputChecksumAlgorithm,
+			excludeSignedRequestHeaders,
+		)
 	}
+}
+
+func s3ChecksumEnabled(props map[string]string) bool {
+	if v, ok := props[io.S3ChecksumEnabled]; ok {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			return enabled
+		}
+	}
+
+	return true
 }
 
 func stripS3InputChecksumAlgorithm(stack *smithymiddleware.Stack) error {
@@ -195,19 +215,61 @@ func stripS3InputChecksumAlgorithm(stack *smithymiddleware.Stack) error {
 	return nil
 }
 
-var gcsIncompatibleSignedHeaders = []string{
+// unsignedRequestHeaders are added by the AWS SDK but rejected by some
+// S3-compatible endpoints (notably GCS) when included in the SigV4 signed
+// header set
+var unsignedRequestHeaders = []string{
 	"Amz-Sdk-Invocation-Id",
 	"Amz-Sdk-Request",
 	"Accept-Encoding",
 }
 
-func stripGCSIncompatibleSignedHeaders(stack *smithymiddleware.Stack) error {
-	m := smithymiddleware.FinalizeMiddlewareFunc(
-		"iceberg-go/strip-gcs-incompatible-signed-headers",
+// restoredRequestHeaders are put back on the wire after signing even though
+// they are excluded from the signature. Accept-Encoding must survive because
+// the SDK sets it to "identity" to stop net/http from transparently
+// negotiating gzip and decompressing the body, which would corrupt the
+// Content-Length-bounded footer/range reads the Parquet/Avro/manifest read
+// path relies on. The Amz-Sdk-* headers are pure SDK telemetry and are left
+// off the wire.
+var restoredRequestHeaders = []string{"Accept-Encoding"}
+
+type excludedSignedHeadersKey struct{}
+
+func excludeSignedRequestHeaders(stack *smithymiddleware.Stack) error {
+	remove := smithymiddleware.FinalizeMiddlewareFunc(
+		"iceberg-go/exclude-signed-request-headers",
 		func(ctx context.Context, in smithymiddleware.FinalizeInput, next smithymiddleware.FinalizeHandler) (smithymiddleware.FinalizeOutput, smithymiddleware.Metadata, error) {
-			if req, ok := in.Request.(*smithyhttp.Request); ok {
-				for _, h := range gcsIncompatibleSignedHeaders {
+			req, ok := in.Request.(*smithyhttp.Request)
+			if !ok {
+				return next.HandleFinalize(ctx, in)
+			}
+
+			removed := make(map[string]string, len(unsignedRequestHeaders))
+			for _, h := range unsignedRequestHeaders {
+				if v := req.Header.Get(h); v != "" {
+					removed[h] = v
 					req.Header.Del(h)
+				}
+			}
+			ctx = smithymiddleware.WithStackValue(ctx, excludedSignedHeadersKey{}, removed)
+
+			return next.HandleFinalize(ctx, in)
+		},
+	)
+
+	restore := smithymiddleware.FinalizeMiddlewareFunc(
+		"iceberg-go/restore-unsigned-request-headers",
+		func(ctx context.Context, in smithymiddleware.FinalizeInput, next smithymiddleware.FinalizeHandler) (smithymiddleware.FinalizeOutput, smithymiddleware.Metadata, error) {
+			req, ok := in.Request.(*smithyhttp.Request)
+			if !ok {
+				return next.HandleFinalize(ctx, in)
+			}
+
+			if removed, ok := smithymiddleware.GetStackValue(ctx, excludedSignedHeadersKey{}).(map[string]string); ok {
+				for _, h := range restoredRequestHeaders {
+					if v, ok := removed[h]; ok {
+						req.Header.Set(h, v)
+					}
 				}
 			}
 
@@ -215,13 +277,17 @@ func stripGCSIncompatibleSignedHeaders(stack *smithymiddleware.Stack) error {
 		},
 	)
 
-	if err := stack.Finalize.Insert(m, "Signing", smithymiddleware.Before); err != nil {
-		return stack.Finalize.Add(m, smithymiddleware.Before)
+	if err := stack.Finalize.Insert(remove, "Signing", smithymiddleware.Before); err != nil {
+		return err
 	}
 
-	return nil
+	return stack.Finalize.Insert(restore, "Signing", smithymiddleware.After)
 }
 
+// resolveUsePathStyle determines whether the S3 client should use
+// path-style addressing. It defaults to virtual-hosted style for
+// standard AWS S3 and path-style for custom endpoints (e.g. MinIO).
+// The s3.force-virtual-addressing property can override either default.
 func resolveUsePathStyle(endpoint string, props map[string]string) bool {
 	usePathStyle := endpoint != ""
 	if forceVirtual, ok := props[io.S3ForceVirtualAddressing]; ok {

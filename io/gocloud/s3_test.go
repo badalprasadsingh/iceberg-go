@@ -326,7 +326,7 @@ func TestApplyS3ClientOptionsNoAwsChunked(t *testing.T) {
 		Credentials: credentials.NewStaticCredentialsProvider("AKIA-TEST", "secret-test", ""),
 		HTTPClient:  srv.Client(),
 	}
-	client := s3.NewFromConfig(cfg, applyS3ClientOptions(srv.URL, nil))
+	client := s3.NewFromConfig(cfg, applyS3ClientOptions(srv.URL, map[string]string{io.S3ChecksumEnabled: "false"}))
 
 	_, err := client.PutObject(context.Background(), &s3.PutObjectInput{
 		Bucket: aws.String("test-bucket"),
@@ -363,6 +363,9 @@ func TestApplyS3ClientOptionsNoAwsChunked(t *testing.T) {
 			"PutObject must not include SDK-internal header %s on the wire, got %q", h, captured.Get(h))
 	}
 
+	assert.Equal(t, "identity", captured.Get("Accept-Encoding"),
+		"Accept-Encoding must be restored to identity on the wire so net/http does not negotiate gzip")
+
 	auth := captured.Get("Authorization")
 	require.NotEmpty(t, auth, "Authorization header must be set")
 	for _, h := range []string{"amz-sdk-invocation-id", "amz-sdk-request", "accept-encoding"} {
@@ -386,7 +389,7 @@ func TestApplyS3ClientOptionsNoAwsChunkedViaTransferManager(t *testing.T) {
 		Credentials: credentials.NewStaticCredentialsProvider("AKIA-TEST", "secret-test", ""),
 		HTTPClient:  srv.Client(),
 	}
-	client := s3.NewFromConfig(cfg, applyS3ClientOptions(srv.URL, nil))
+	client := s3.NewFromConfig(cfg, applyS3ClientOptions(srv.URL, map[string]string{io.S3ChecksumEnabled: "false"}))
 
 	tm := transfermanager.New(client)
 	_, err := tm.UploadObject(context.Background(), &transfermanager.UploadObjectInput{
@@ -425,6 +428,9 @@ func TestApplyS3ClientOptionsNoAwsChunkedViaTransferManager(t *testing.T) {
 			"transfer-manager PutObject must not include SDK-internal header %s on the wire, got %q", h, captured.Get(h))
 	}
 
+	assert.Equal(t, "identity", captured.Get("Accept-Encoding"),
+		"Accept-Encoding must be restored to identity on the wire so net/http does not negotiate gzip")
+
 	auth := captured.Get("Authorization")
 	require.NotEmpty(t, auth, "Authorization header must be set")
 	for _, h := range []string{"amz-sdk-invocation-id", "amz-sdk-request", "accept-encoding"} {
@@ -433,21 +439,77 @@ func TestApplyS3ClientOptionsNoAwsChunkedViaTransferManager(t *testing.T) {
 	}
 }
 
+// TestExcludeSignedRequestHeadersOnRead verifies the workaround also fixes the
+// read path (which is where issue #1816 originally failed, e.g. ListObjects):
+// the GCS-incompatible headers are dropped from the signature, while
+// Accept-Encoding: identity is restored on the wire so net/http does not
+// transparently gzip-decompress range/footer reads.
+func TestExcludeSignedRequestHeadersOnRead(t *testing.T) {
+	t.Parallel()
+
+	var captured http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("payload"))
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := aws.Config{
+		Region:      "auto",
+		Credentials: credentials.NewStaticCredentialsProvider("AKIA-TEST", "secret-test", ""),
+		HTTPClient:  srv.Client(),
+	}
+	client := s3.NewFromConfig(cfg, applyS3ClientOptions(srv.URL, map[string]string{io.S3ChecksumEnabled: "false"}))
+
+	out, err := client.GetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String("test-bucket"),
+		Key:    aws.String("test-key"),
+	})
+	require.NoError(t, err)
+	if out.Body != nil {
+		_ = out.Body.Close()
+	}
+	require.NotNil(t, captured)
+
+	assert.Equal(t, "identity", captured.Get("Accept-Encoding"),
+		"reads must keep Accept-Encoding: identity on the wire to avoid transparent gzip decompression")
+
+	auth := captured.Get("Authorization")
+	require.NotEmpty(t, auth, "Authorization header must be set")
+	for _, h := range []string{"amz-sdk-invocation-id", "amz-sdk-request", "accept-encoding"} {
+		assert.NotContainsf(t, auth, h,
+			"SignedHeaders in Authorization must not list header %q on reads either, got Authorization=%q", h, auth)
+	}
+}
+
 func TestApplyS3ClientOptionsChecksumMode(t *testing.T) {
 	t.Parallel()
 
-	t.Run("custom endpoint switches to WhenRequired and installs strip middleware", func(t *testing.T) {
+	t.Run("checksum disabled installs compatibility middleware", func(t *testing.T) {
 		t.Parallel()
 
 		var opts s3.Options
-		applyS3ClientOptions("https://storage.googleapis.com", nil)(&opts)
+		applyS3ClientOptions("https://storage.googleapis.com", map[string]string{io.S3ChecksumEnabled: "false"})(&opts)
 
 		require.NotNil(t, opts.BaseEndpoint)
 		assert.Equal(t, "https://storage.googleapis.com", *opts.BaseEndpoint)
 		assert.Equal(t, aws.RequestChecksumCalculationWhenRequired, opts.RequestChecksumCalculation)
 		assert.True(t, opts.UsePathStyle)
 		require.Len(t, opts.APIOptions, 2,
-			"expected two API options: the checksum-strip and GCS-incompatible-header-strip middlewares")
+			"expected two API options: the checksum-strip and signed-header-exclusion middlewares")
+	})
+
+	t.Run("checksum enabled by default leaves SDK behavior unchanged", func(t *testing.T) {
+		t.Parallel()
+
+		var opts s3.Options
+		applyS3ClientOptions("https://storage.googleapis.com", nil)(&opts)
+
+		require.NotNil(t, opts.BaseEndpoint, "a custom endpoint is still configured")
+		assert.Equal(t, aws.RequestChecksumCalculationUnset, opts.RequestChecksumCalculation)
+		assert.Empty(t, opts.APIOptions,
+			"no compatibility middleware unless s3.checksum-enabled=false")
 	})
 
 	t.Run("no endpoint leaves defaults (genuine AWS S3)", func(t *testing.T) {
