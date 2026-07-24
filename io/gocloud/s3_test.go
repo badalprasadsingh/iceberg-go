@@ -311,8 +311,6 @@ func TestResolveUsePathStyle(t *testing.T) {
 	}
 }
 
-// compatModeS3Options mirrors the compat-mode option assembly in createS3Bucket
-// using the real middleware, so the wire tests exercise production behavior.
 func compatModeS3Options(endpoint string) func(*s3.Options) {
 	return func(o *s3.Options) {
 		o.BaseEndpoint = aws.String(endpoint)
@@ -443,9 +441,6 @@ func TestCompatModeReadKeepsAcceptEncoding(t *testing.T) {
 	_ = out.Body.Close()
 	require.NotNil(t, captured)
 
-	// The SDK sets Accept-Encoding: identity on reads so net/http won't
-	// auto-negotiate gzip and silently decompress Content-Length-bounded reads.
-	// The write-only strip middleware must leave it intact.
 	assert.Equal(t, "identity", captured.Get("Accept-Encoding"),
 		"GetObject must keep Accept-Encoding: identity so reads are not gzip-decompressed")
 }

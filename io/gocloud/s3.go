@@ -220,9 +220,6 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 	return bucket, nil
 }
 
-// stripS3InputChecksumAlgorithm installs an Initialize middleware that clears
-// ChecksumAlgorithm on write inputs before the SDK's checksum setup runs, so the
-// SDK won't enable aws-chunked streaming/trailer checksums that GCS rejects.
 func stripS3InputChecksumAlgorithm(stack *smithymiddleware.Stack) error {
 	m := smithymiddleware.InitializeMiddlewareFunc(
 		"iceberg-go/strip-s3-input-checksum-algorithm",
@@ -262,9 +259,6 @@ var gcsStripSignedHeaderOps = map[string]struct{}{
 	"CreateMultipartUpload": {},
 }
 
-// stripGCSIncompatibleSignedHeaders installs a Finalize middleware that runs
-// before signing and removes GCS-incompatible headers from write requests, so
-// they're left out of the SigV4 signed set and GCS accepts the signature.
 func stripGCSIncompatibleSignedHeaders(stack *smithymiddleware.Stack) error {
 	m := smithymiddleware.FinalizeMiddlewareFunc(
 		"iceberg-go/strip-gcs-incompatible-signed-headers",
@@ -288,8 +282,6 @@ func stripGCSIncompatibleSignedHeaders(stack *smithymiddleware.Stack) error {
 	return nil
 }
 
-// s3CompatModeEnabled reports whether the S3 compatibility workarounds are
-// explicitly opted into via the s3.compat-mode property.
 func s3CompatModeEnabled(props map[string]string) bool {
 	if v, ok := props[io.S3CompatMode]; ok {
 		if enabled, err := strconv.ParseBool(v); err == nil {
