@@ -31,10 +31,6 @@ const (
 	S3SignerURI              = "s3.signer.uri"
 	S3RemoteSigningEnabled   = "s3.remote-signing-enabled"
 	S3ForceVirtualAddressing = "s3.force-virtual-addressing"
-	// S3CompatMode enables compatibility with non-AWS S3 endpoints (e.g.
-	// Google Cloud Storage's interop endpoint used with HMAC keys) that reject
-	// the AWS SDK's request checksums and signed SDK-internal headers. Defaults
-	// to off, so AWS S3, MinIO, R2, and Ceph are unaffected.
 	S3CompatMode   = "s3.compat-mode"
 	S3ClientRegion = "client.region"
 )

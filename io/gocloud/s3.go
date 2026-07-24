@@ -154,11 +154,10 @@ func applyS3TransportTuning(t *http.Transport) {
 	t.IdleConnTimeout = s3IdleConnTimeout
 }
 
-// applyS3ClientOptions configures the S3 client. When s3.compat-mode is set, it
-// applies the workaround needed by non-AWS S3-compatible endpoints (such as
-// Google Cloud Storage's interop endpoint used with HMAC keys) that reject the
-// AWS SDK's request checksums and signed SDK-internal headers. It defaults to
-// off, so AWS S3, MinIO, R2, and Ceph are unaffected on upgrade.
+// It configures the S3 client. When s3.compat-mode is set it
+// applies the workaround for non-AWS S3 endpoints (e.g. GCS's interop endpoint
+// with HMAC keys) that reject request checksums and signed SDK-internal
+// headers. Defaults to off.
 func applyS3ClientOptions(endpoint string, props map[string]string) func(*s3.Options) {
 	return func(o *s3.Options) {
 		if endpoint != "" {
@@ -214,8 +213,7 @@ func stripS3InputChecksumAlgorithm(stack *smithymiddleware.Stack) error {
 }
 
 // unsignedRequestHeaders are added by the AWS SDK but rejected by some
-// S3-compatible endpoints (notably GCS) when included in the SigV4 signed
-// header set
+// S3-compatible endpoints (notably GCS) when included in the SigV4 signature.
 var unsignedRequestHeaders = []string{
 	"Amz-Sdk-Invocation-Id",
 	"Amz-Sdk-Request",
@@ -224,13 +222,15 @@ var unsignedRequestHeaders = []string{
 
 // restoredRequestHeaders are put back on the wire after signing (but kept out
 // of the signature). Accept-Encoding must stay "identity" so net/http does not
-// auto-negotiate gzip and decompress the body, which would corrupt the
-// Content-Length-bounded range/footer reads. The Amz-Sdk-* headers are SDK
-// telemetry and stay off the wire.
+// auto-negotiate gzip and decompress the body, corrupting Content-Length-bounded
+// range/footer reads. The Amz-Sdk-* telemetry headers stay off the wire.
 var restoredRequestHeaders = []string{"Accept-Encoding"}
 
 type excludedSignedHeadersKey struct{}
 
+// excludeSignedRequestHeaders removes unsignedRequestHeaders before SigV4
+// signing and restores restoredRequestHeaders on the wire afterwards, so the
+// signature omits GCS-incompatible headers without breaking reads.
 func excludeSignedRequestHeaders(stack *smithymiddleware.Stack) error {
 	remove := smithymiddleware.FinalizeMiddlewareFunc(
 		"iceberg-go/exclude-signed-request-headers",

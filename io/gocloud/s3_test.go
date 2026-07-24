@@ -19,6 +19,7 @@ package gocloud
 
 import (
 	"context"
+	stdio "io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -447,11 +448,13 @@ func TestApplyS3ClientOptionsNoAwsChunkedViaTransferManager(t *testing.T) {
 func TestExcludeSignedRequestHeadersOnRead(t *testing.T) {
 	t.Parallel()
 
+	const payload = "footer-and-range-bytes"
+
 	var captured http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		captured = r.Header.Clone()
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("payload"))
+		_, _ = w.Write([]byte(payload))
 	}))
 	t.Cleanup(srv.Close)
 
@@ -467,9 +470,12 @@ func TestExcludeSignedRequestHeadersOnRead(t *testing.T) {
 		Key:    aws.String("test-key"),
 	})
 	require.NoError(t, err)
-	if out.Body != nil {
-		_ = out.Body.Close()
-	}
+	require.NotNil(t, out.Body)
+	body, err := stdio.ReadAll(out.Body)
+	require.NoError(t, out.Body.Close())
+	require.NoError(t, err)
+	assert.Equal(t, payload, string(body),
+		"read body must not be gzip-corrupted; Accept-Encoding: identity must survive on the wire")
 	require.NotNil(t, captured)
 
 	assert.Equal(t, "identity", captured.Get("Accept-Encoding"),
