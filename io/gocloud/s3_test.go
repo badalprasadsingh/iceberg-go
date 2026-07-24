@@ -326,7 +326,7 @@ func TestApplyS3ClientOptionsNoAwsChunked(t *testing.T) {
 		Credentials: credentials.NewStaticCredentialsProvider("AKIA-TEST", "secret-test", ""),
 		HTTPClient:  srv.Client(),
 	}
-	client := s3.NewFromConfig(cfg, applyS3ClientOptions(srv.URL, map[string]string{io.S3ChecksumEnabled: "false"}))
+	client := s3.NewFromConfig(cfg, applyS3ClientOptions(srv.URL, map[string]string{io.S3CompatMode: "true"}))
 
 	_, err := client.PutObject(context.Background(), &s3.PutObjectInput{
 		Bucket: aws.String("test-bucket"),
@@ -389,7 +389,7 @@ func TestApplyS3ClientOptionsNoAwsChunkedViaTransferManager(t *testing.T) {
 		Credentials: credentials.NewStaticCredentialsProvider("AKIA-TEST", "secret-test", ""),
 		HTTPClient:  srv.Client(),
 	}
-	client := s3.NewFromConfig(cfg, applyS3ClientOptions(srv.URL, map[string]string{io.S3ChecksumEnabled: "false"}))
+	client := s3.NewFromConfig(cfg, applyS3ClientOptions(srv.URL, map[string]string{io.S3CompatMode: "true"}))
 
 	tm := transfermanager.New(client)
 	_, err := tm.UploadObject(context.Background(), &transfermanager.UploadObjectInput{
@@ -440,10 +440,10 @@ func TestApplyS3ClientOptionsNoAwsChunkedViaTransferManager(t *testing.T) {
 }
 
 // TestExcludeSignedRequestHeadersOnRead verifies the workaround also fixes the
-// read path (which is where issue #1816 originally failed, e.g. ListObjects):
-// the GCS-incompatible headers are dropped from the signature, while
-// Accept-Encoding: identity is restored on the wire so net/http does not
-// transparently gzip-decompress range/footer reads.
+// read path (e.g. ListObjects/GetObject): the GCS-incompatible headers are
+// dropped from the signature, while Accept-Encoding: identity is restored on
+// the wire so net/http does not transparently gzip-decompress range/footer
+// reads.
 func TestExcludeSignedRequestHeadersOnRead(t *testing.T) {
 	t.Parallel()
 
@@ -460,7 +460,7 @@ func TestExcludeSignedRequestHeadersOnRead(t *testing.T) {
 		Credentials: credentials.NewStaticCredentialsProvider("AKIA-TEST", "secret-test", ""),
 		HTTPClient:  srv.Client(),
 	}
-	client := s3.NewFromConfig(cfg, applyS3ClientOptions(srv.URL, map[string]string{io.S3ChecksumEnabled: "false"}))
+	client := s3.NewFromConfig(cfg, applyS3ClientOptions(srv.URL, map[string]string{io.S3CompatMode: "true"}))
 
 	out, err := client.GetObject(context.Background(), &s3.GetObjectInput{
 		Bucket: aws.String("test-bucket"),
@@ -483,14 +483,14 @@ func TestExcludeSignedRequestHeadersOnRead(t *testing.T) {
 	}
 }
 
-func TestApplyS3ClientOptionsChecksumMode(t *testing.T) {
+func TestApplyS3ClientOptionsCompatMode(t *testing.T) {
 	t.Parallel()
 
-	t.Run("checksum disabled installs compatibility middleware", func(t *testing.T) {
+	t.Run("compat mode installs compatibility middleware", func(t *testing.T) {
 		t.Parallel()
 
 		var opts s3.Options
-		applyS3ClientOptions("https://storage.googleapis.com", map[string]string{io.S3ChecksumEnabled: "false"})(&opts)
+		applyS3ClientOptions("https://storage.googleapis.com", map[string]string{io.S3CompatMode: "true"})(&opts)
 
 		require.NotNil(t, opts.BaseEndpoint)
 		assert.Equal(t, "https://storage.googleapis.com", *opts.BaseEndpoint)
@@ -500,7 +500,7 @@ func TestApplyS3ClientOptionsChecksumMode(t *testing.T) {
 			"expected two API options: the checksum-strip and signed-header-exclusion middlewares")
 	})
 
-	t.Run("checksum enabled by default leaves SDK behavior unchanged", func(t *testing.T) {
+	t.Run("compat mode off by default leaves SDK behavior unchanged", func(t *testing.T) {
 		t.Parallel()
 
 		var opts s3.Options
@@ -509,7 +509,7 @@ func TestApplyS3ClientOptionsChecksumMode(t *testing.T) {
 		require.NotNil(t, opts.BaseEndpoint, "a custom endpoint is still configured")
 		assert.Equal(t, aws.RequestChecksumCalculationUnset, opts.RequestChecksumCalculation)
 		assert.Empty(t, opts.APIOptions,
-			"no compatibility middleware unless s3.checksum-enabled=false")
+			"no compatibility middleware unless s3.compat-mode=true")
 	})
 
 	t.Run("no endpoint leaves defaults (genuine AWS S3)", func(t *testing.T) {
@@ -523,6 +523,40 @@ func TestApplyS3ClientOptionsChecksumMode(t *testing.T) {
 		assert.False(t, opts.UsePathStyle)
 		assert.Empty(t, opts.APIOptions, "no API options should be added for genuine AWS S3")
 	})
+
+	t.Run("custom endpoint without compat mode is unchanged (MinIO/R2/Ceph)", func(t *testing.T) {
+		t.Parallel()
+
+		var opts s3.Options
+		applyS3ClientOptions("http://localhost:9000", nil)(&opts)
+
+		assert.Equal(t, aws.RequestChecksumCalculationUnset, opts.RequestChecksumCalculation)
+		assert.Empty(t, opts.APIOptions,
+			"a custom endpoint alone must not trigger the compatibility workaround")
+	})
+}
+
+func TestS3CompatMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		props map[string]string
+		want  bool
+	}{
+		{name: "unset defaults to off", props: nil, want: false},
+		{name: "true enables compat mode", props: map[string]string{io.S3CompatMode: "true"}, want: true},
+		{name: "false disables compat mode", props: map[string]string{io.S3CompatMode: "false"}, want: false},
+		{name: "invalid value defaults to off", props: map[string]string{io.S3CompatMode: "not-a-bool"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, s3CompatMode(tt.props))
+		})
+	}
 }
 
 func TestStripS3InputChecksumAlgorithmMiddleware(t *testing.T) {

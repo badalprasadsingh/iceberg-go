@@ -154,13 +154,11 @@ func applyS3TransportTuning(t *http.Transport) {
 	t.IdleConnTimeout = s3IdleConnTimeout
 }
 
-// applyS3ClientOptions configures the S3 client. When the s3.checksum-enabled
-// property is false, it applies the compatibility workaround needed by
-// S3-compatible endpoints (such as Google Cloud Storage's interop endpoint
-// used with HMAC keys) that reject the AWS SDK's default request checksums and
-// its signed SDK-internal headers. The property defaults to true, leaving the
-// AWS SDK behavior unchanged, so genuine AWS S3, MinIO, R2, Ceph, and similar
-// backends are unaffected on upgrade.
+// applyS3ClientOptions configures the S3 client. When s3.compat-mode is set, it
+// applies the workaround needed by non-AWS S3-compatible endpoints (such as
+// Google Cloud Storage's interop endpoint used with HMAC keys) that reject the
+// AWS SDK's request checksums and signed SDK-internal headers. It defaults to
+// off, so AWS S3, MinIO, R2, and Ceph are unaffected on upgrade.
 func applyS3ClientOptions(endpoint string, props map[string]string) func(*s3.Options) {
 	return func(o *s3.Options) {
 		if endpoint != "" {
@@ -168,7 +166,7 @@ func applyS3ClientOptions(endpoint string, props map[string]string) func(*s3.Opt
 		}
 		o.UsePathStyle = resolveUsePathStyle(endpoint, props)
 
-		if s3ChecksumEnabled(props) {
+		if !s3CompatMode(props) {
 			return
 		}
 
@@ -181,14 +179,14 @@ func applyS3ClientOptions(endpoint string, props map[string]string) func(*s3.Opt
 	}
 }
 
-func s3ChecksumEnabled(props map[string]string) bool {
-	if v, ok := props[io.S3ChecksumEnabled]; ok {
+func s3CompatMode(props map[string]string) bool {
+	if v, ok := props[io.S3CompatMode]; ok {
 		if enabled, err := strconv.ParseBool(v); err == nil {
 			return enabled
 		}
 	}
 
-	return true
+	return false
 }
 
 func stripS3InputChecksumAlgorithm(stack *smithymiddleware.Stack) error {
@@ -224,13 +222,11 @@ var unsignedRequestHeaders = []string{
 	"Accept-Encoding",
 }
 
-// restoredRequestHeaders are put back on the wire after signing even though
-// they are excluded from the signature. Accept-Encoding must survive because
-// the SDK sets it to "identity" to stop net/http from transparently
-// negotiating gzip and decompressing the body, which would corrupt the
-// Content-Length-bounded footer/range reads the Parquet/Avro/manifest read
-// path relies on. The Amz-Sdk-* headers are pure SDK telemetry and are left
-// off the wire.
+// restoredRequestHeaders are put back on the wire after signing (but kept out
+// of the signature). Accept-Encoding must stay "identity" so net/http does not
+// auto-negotiate gzip and decompress the body, which would corrupt the
+// Content-Length-bounded range/footer reads. The Amz-Sdk-* headers are SDK
+// telemetry and stay off the wire.
 var restoredRequestHeaders = []string{"Accept-Encoding"}
 
 type excludedSignedHeadersKey struct{}
