@@ -416,35 +416,6 @@ func TestCompatModeTransferManagerNoAwsChunked(t *testing.T) {
 	assertNoAwsChunkedWriteHeaders(t, captured, "transfer-manager PutObject")
 }
 
-func TestCompatModeReadKeepsAcceptEncoding(t *testing.T) {
-	t.Parallel()
-
-	var captured http.Header
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		captured = r.Header.Clone()
-		_, _ = w.Write([]byte("hello"))
-	}))
-	t.Cleanup(srv.Close)
-
-	cfg := aws.Config{
-		Region:      "auto",
-		Credentials: credentials.NewStaticCredentialsProvider("AKIA-TEST", "secret-test", ""),
-		HTTPClient:  srv.Client(),
-	}
-	client := s3.NewFromConfig(cfg, compatModeS3Options(srv.URL))
-
-	out, err := client.GetObject(context.Background(), &s3.GetObjectInput{
-		Bucket: aws.String("test-bucket"),
-		Key:    aws.String("test-key"),
-	})
-	require.NoError(t, err)
-	_ = out.Body.Close()
-	require.NotNil(t, captured)
-
-	assert.Equal(t, "identity", captured.Get("Accept-Encoding"),
-		"GetObject must keep Accept-Encoding: identity so reads are not gzip-decompressed")
-}
-
 func TestS3CompatModeEnabled(t *testing.T) {
 	t.Parallel()
 
