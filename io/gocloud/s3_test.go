@@ -322,6 +322,46 @@ func compatModeS3Options(endpoint string) func(*s3.Options) {
 	}
 }
 
+func assertNoAwsChunkedWriteHeaders(t *testing.T, captured http.Header, op string) {
+	t.Helper()
+
+	require.NotNil(t, captured)
+
+	for header := range captured {
+		h := strings.ToLower(header)
+		assert.Falsef(t, strings.HasPrefix(h, "x-amz-checksum-"),
+			"%s must not send checksum headers against custom endpoints, got %s=%q",
+			op, header, captured.Get(header))
+		assert.NotEqualf(t, "x-amz-trailer", h,
+			"%s must not declare a SigV4 trailer against custom endpoints, got %s=%q",
+			op, header, captured.Get(header))
+		assert.NotEqualf(t, "x-amz-sdk-checksum-algorithm", h,
+			"%s must not declare an SDK checksum algorithm against custom endpoints, got %s=%q",
+			op, header, captured.Get(header))
+	}
+
+	if ce := captured.Get("Content-Encoding"); ce != "" {
+		assert.NotContainsf(t, ce, "aws-chunked",
+			"%s must not use aws-chunked transfer encoding against custom endpoints, got Content-Encoding=%q", op, ce)
+	}
+	if sha := captured.Get("X-Amz-Content-Sha256"); sha != "" {
+		assert.NotContainsf(t, sha, "STREAMING-",
+			"%s must use a precomputed payload hash against custom endpoints, got X-Amz-Content-Sha256=%q", op, sha)
+	}
+
+	for _, h := range []string{"Amz-Sdk-Invocation-Id", "Amz-Sdk-Request"} {
+		assert.Emptyf(t, captured.Get(h),
+			"%s must not include SDK-internal header %s on the wire, got %q", op, h, captured.Get(h))
+	}
+
+	auth := captured.Get("Authorization")
+	require.NotEmpty(t, auth, "Authorization header must be set")
+	for _, h := range []string{"amz-sdk-invocation-id", "amz-sdk-request", "accept-encoding"} {
+		assert.NotContainsf(t, auth, h,
+			"SignedHeaders in Authorization must not list GCS-incompatible header %q, got Authorization=%q", h, auth)
+	}
+}
+
 func TestCompatModePutObjectNoAwsChunked(t *testing.T) {
 	t.Parallel()
 
@@ -345,41 +385,8 @@ func TestCompatModePutObjectNoAwsChunked(t *testing.T) {
 		Body:   strings.NewReader("hello"),
 	})
 	require.NoError(t, err)
-	require.NotNil(t, captured)
 
-	for header := range captured {
-		h := strings.ToLower(header)
-		assert.Falsef(t, strings.HasPrefix(h, "x-amz-checksum-"),
-			"PutObject must not send checksum headers against custom endpoints, got %s=%q",
-			header, captured.Get(header))
-		assert.NotEqualf(t, "x-amz-trailer", h,
-			"PutObject must not declare a SigV4 trailer against custom endpoints, got %s=%q",
-			header, captured.Get(header))
-		assert.NotEqualf(t, "x-amz-sdk-checksum-algorithm", h,
-			"PutObject must not declare an SDK checksum algorithm against custom endpoints, got %s=%q",
-			header, captured.Get(header))
-	}
-
-	if ce := captured.Get("Content-Encoding"); ce != "" {
-		assert.NotContainsf(t, ce, "aws-chunked",
-			"PutObject must not use aws-chunked transfer encoding against custom endpoints, got Content-Encoding=%q", ce)
-	}
-	if sha := captured.Get("X-Amz-Content-Sha256"); sha != "" {
-		assert.NotContainsf(t, sha, "STREAMING-",
-			"PutObject must use a precomputed payload hash against custom endpoints, got X-Amz-Content-Sha256=%q", sha)
-	}
-
-	for _, h := range []string{"Amz-Sdk-Invocation-Id", "Amz-Sdk-Request"} {
-		assert.Emptyf(t, captured.Get(h),
-			"PutObject must not include SDK-internal header %s on the wire, got %q", h, captured.Get(h))
-	}
-
-	auth := captured.Get("Authorization")
-	require.NotEmpty(t, auth, "Authorization header must be set")
-	for _, h := range []string{"amz-sdk-invocation-id", "amz-sdk-request", "accept-encoding"} {
-		assert.NotContainsf(t, auth, h,
-			"SignedHeaders in Authorization must not list GCS-incompatible header %q, got Authorization=%q", h, auth)
-	}
+	assertNoAwsChunkedWriteHeaders(t, captured, "PutObject")
 }
 
 func TestCompatModeTransferManagerNoAwsChunked(t *testing.T) {
@@ -407,41 +414,8 @@ func TestCompatModeTransferManagerNoAwsChunked(t *testing.T) {
 		ContentType: aws.String("application/octet-stream"),
 	})
 	require.NoError(t, err)
-	require.NotNil(t, captured)
 
-	for header := range captured {
-		h := strings.ToLower(header)
-		assert.Falsef(t, strings.HasPrefix(h, "x-amz-checksum-"),
-			"transfer-manager PutObject must not send checksum headers against custom endpoints, got %s=%q",
-			header, captured.Get(header))
-		assert.NotEqualf(t, "x-amz-trailer", h,
-			"transfer-manager PutObject must not declare a SigV4 trailer against custom endpoints, got %s=%q",
-			header, captured.Get(header))
-		assert.NotEqualf(t, "x-amz-sdk-checksum-algorithm", h,
-			"transfer-manager PutObject must not declare an SDK checksum algorithm against custom endpoints, got %s=%q",
-			header, captured.Get(header))
-	}
-
-	if ce := captured.Get("Content-Encoding"); ce != "" {
-		assert.NotContainsf(t, ce, "aws-chunked",
-			"transfer-manager PutObject must not use aws-chunked transfer encoding against custom endpoints, got Content-Encoding=%q", ce)
-	}
-	if sha := captured.Get("X-Amz-Content-Sha256"); sha != "" {
-		assert.NotContainsf(t, sha, "STREAMING-",
-			"transfer-manager PutObject must use a precomputed payload hash against custom endpoints, got X-Amz-Content-Sha256=%q", sha)
-	}
-
-	for _, h := range []string{"Amz-Sdk-Invocation-Id", "Amz-Sdk-Request"} {
-		assert.Emptyf(t, captured.Get(h),
-			"transfer-manager PutObject must not include SDK-internal header %s on the wire, got %q", h, captured.Get(h))
-	}
-
-	auth := captured.Get("Authorization")
-	require.NotEmpty(t, auth, "Authorization header must be set")
-	for _, h := range []string{"amz-sdk-invocation-id", "amz-sdk-request", "accept-encoding"} {
-		assert.NotContainsf(t, auth, h,
-			"SignedHeaders in Authorization must not list GCS-incompatible header %q, got Authorization=%q", h, auth)
-	}
+	assertNoAwsChunkedWriteHeaders(t, captured, "transfer-manager PutObject")
 }
 
 func TestCompatModeReadKeepsAcceptEncoding(t *testing.T) {
