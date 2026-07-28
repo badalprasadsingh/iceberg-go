@@ -390,6 +390,70 @@ func TestVendedCredsRefreshTriggeredWithinExpiryBuffer(t *testing.T) {
 	}
 }
 
+func TestVendedCredsPlanScopedNotRefusedWithinBuffer(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+
+	// Plan-scoped refresher: no fetchCreds, so creds can't be renewed.
+	// A cred still valid but inside the prefetch buffer must be served, not refused.
+	r := &vendedCredentialRefresher{
+		mu:       semaphore.NewWeighted(1),
+		location: "file:///tmp/test",
+		props:    iceberg.Properties{},
+		nowFunc:  func() time.Time { return now },
+	}
+	r.cachedIO = iceio.LocalFS{}
+	r.expiresAt = now.Add(defaultVendedCredentialsExpiryBuffer - time.Minute)
+
+	got, err := r.loadFS(context.Background())
+	require.NoError(t, err,
+		"plan-scoped creds still within their hard expiry must not be refused early")
+	assert.Equal(t, r.cachedIO, got)
+
+	// Past the hard expiry, with no way to renew, the load fails.
+	r.nowFunc = func() time.Time { return now.Add(time.Hour) }
+	_, err = r.loadFS(context.Background())
+	require.ErrorIs(t, err, ErrVendedCredentialsExpired)
+}
+
+func TestVendedCredsRefreshBufferClampedToLifetime(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	// Short-lived (2m) renewable token. 
+	// Buffer : lifetime/2 (1m), so a just-issued token is served from cache instead of re-fetched at once.
+	shortTTL := 2 * time.Minute
+
+	var callCount atomic.Int32
+	r := newTestRefresher(func(ctx context.Context, ident []string) (iceberg.Properties, error) {
+		callCount.Add(1)
+
+		return iceberg.Properties{
+			keyS3TokenExpiresAtMs: strconv.FormatInt(now.Add(shortTTL).UnixMilli(), 10),
+		}, nil
+	})
+	r.nowFunc = func() time.Time { return now }
+
+	// Seed an already-issued short-lived credential.
+	r.cachedIO = iceio.LocalFS{}
+	r.issuedAt = now
+	r.expiresAt = now.Add(shortTTL)
+
+	// buffer = min(5m, 2m/2) = 1m, so at issue time the cache is still served.
+	_, err := r.loadFS(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), callCount.Load(),
+		"a freshly issued short-lived token must be served from cache, not re-fetched")
+
+	// Once inside the clamped 1m window, it refreshes proactively.
+	r.nowFunc = func() time.Time { return now.Add(90 * time.Second) }
+	_, err = r.loadFS(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), callCount.Load(),
+		"token within the clamped buffer window must be refreshed")
+}
+
 func TestResolveStorageCredentials(t *testing.T) {
 	t.Parallel()
 
