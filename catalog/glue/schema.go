@@ -19,6 +19,8 @@ package glue
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -28,7 +30,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
 )
 
-func schemasToGlueColumns(metadata table.Metadata) []types.Column {
+func schemasToGlueColumns(metadata table.Metadata, existingColumns []types.Column) []types.Column {
 	// preserve the current schema's logical column order and then,
 	// append columns from historical schemas that are not already present
 	var columns []types.Column
@@ -58,6 +60,56 @@ func schemasToGlueColumns(metadata table.Metadata) []types.Column {
 		}
 	}
 
+	existingComments := make(map[string]string)
+	for _, column := range existingColumns {
+		fieldID := column.Parameters[icebergFieldIDKey]
+		if fieldID == "" || column.Comment == nil {
+			continue
+		}
+		if _, ok := existingComments[fieldID]; !ok {
+			existingComments[fieldID] = aws.ToString(column.Comment)
+		}
+	}
+
+	// Preserve nil for fields that have never had an Iceberg doc, but keep an
+	// explicit empty string when a documented field was cleared in a later schema.
+	clearedComments := make(map[string]struct{})
+	currentSchema := metadata.CurrentSchema()
+	for _, field := range currentSchema.Fields() {
+		if field.Doc != "" {
+			continue
+		}
+
+		for _, schema := range metadata.Schemas() {
+			if schema.ID == currentSchema.ID {
+				continue
+			}
+			if previous, ok := schema.FindFieldByID(field.ID); ok && previous.Doc != "" {
+				clearedComments[strconv.Itoa(field.ID)] = struct{}{}
+
+				break
+			}
+		}
+	}
+
+	for name, column := range results {
+		if column.Comment != nil {
+			continue
+		}
+
+		fieldID := column.Parameters[icebergFieldIDKey]
+		if _, ok := clearedComments[fieldID]; ok {
+			column.Comment = aws.String("")
+			results[name] = column
+
+			continue
+		}
+		if comment, ok := existingComments[fieldID]; ok {
+			column.Comment = aws.String(comment)
+			results[name] = column
+		}
+	}
+
 	return columns
 }
 
@@ -74,14 +126,16 @@ func schemaToGlueColumns(schema *iceberg.Schema, isCurrent bool) []types.Column 
 // fieldToGlueColumn converts an Iceberg nested field to a Glue column.
 func fieldToGlueColumn(field iceberg.NestedField, isCurrent bool) types.Column {
 	column := types.Column{
-		Name:    aws.String(field.Name),
-		Comment: aws.String(field.Doc),
-		Type:    aws.String(icebergTypeToGlueType(field.Type)),
+		Name: aws.String(field.Name),
+		Type: aws.String(icebergTypeToGlueType(field.Type)),
 		Parameters: map[string]string{
 			icebergFieldIDKey:       strconv.Itoa(field.ID),
 			icebergFieldOptionalKey: strconv.FormatBool(!field.Required),
 			icebergFieldCurrentKey:  strconv.FormatBool(isCurrent),
 		},
+	}
+	if field.Doc != "" {
+		column.Comment = aws.String(field.Doc)
 	}
 
 	return column
