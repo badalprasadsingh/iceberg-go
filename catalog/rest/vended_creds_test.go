@@ -159,7 +159,10 @@ func TestVendedCredsGracefulDegradation(t *testing.T) {
 	fetchErr := errors.New("network error")
 	now := time.Now()
 
+	var callCount atomic.Int32
 	r := newTestRefresher(func(ctx context.Context, ident []string) (iceberg.Properties, error) {
+		callCount.Add(1)
+
 		return nil, fetchErr
 	})
 	r.nowFunc = func() time.Time { return now }
@@ -172,6 +175,7 @@ func TestVendedCredsGracefulDegradation(t *testing.T) {
 	got, err := r.loadFS(context.Background())
 	require.NoError(t, err, "should not return error when cached IO exists and refresh fails")
 	assert.Equal(t, existingIO, got, "should return cached IO on refresh failure")
+	assert.Equal(t, int32(1), callCount.Load(), "a refresh should have been attempted")
 }
 
 func TestVendedCredsErrorWhenInitialLoadFails(t *testing.T) {
@@ -454,30 +458,16 @@ func TestVendedCredsRefreshBufferClampedToLifetime(t *testing.T) {
 		"token within the clamped buffer window must be refreshed")
 }
 
-func TestVendedCredsRefreshFailureWithinBufferServesCache(t *testing.T) {
+func TestVendedCredsShouldRefreshNeverExpires(t *testing.T) {
 	t.Parallel()
 
-	now := time.Now()
-	fetchErr := errors.New("network error")
-
-	var callCount atomic.Int32
-	r := newTestRefresher(func(ctx context.Context, ident []string) (iceberg.Properties, error) {
-		callCount.Add(1)
-
-		return nil, fetchErr
-	})
-	r.nowFunc = func() time.Time { return now }
-
-	// Cred is inside the prefetch buffer but still valid (not hard-expired).
-	existingIO := iceio.LocalFS{}
-	r.cachedIO = existingIO
-	r.expiresAt = now.Add(defaultVendedCredentialsExpiryBuffer - time.Minute)
-
-	got, err := r.loadFS(context.Background())
-	require.NoError(t, err,
-		"a proactive refresh failure must not error while the cached creds are still valid")
-	assert.Equal(t, existingIO, got, "still-valid cache must be served when refresh fails")
-	assert.Equal(t, int32(1), callCount.Load(), "a refresh should have been attempted")
+	r := &vendedCredentialRefresher{
+		mu:        semaphore.NewWeighted(1),
+		nowFunc:   func() time.Time { return time.Now() },
+		expiresAt: time.Time{},
+	}
+	assert.False(t, r.shouldRefresh(),
+		"credentials with no expiry must never be proactively refreshed")
 }
 
 func TestVendedCredsRefreshBuffer(t *testing.T) {
