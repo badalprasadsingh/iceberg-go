@@ -345,7 +345,7 @@ func TestVendedCredsRefreshTriggeredWithinExpiryBuffer(t *testing.T) {
 		wantRefreshed bool
 	}{
 		{
-			name:          "within buffer refreshses",
+			name:          "within buffer refreshes",
 			expiresIn:     defaultVendedCredentialsExpiryBuffer - time.Minute,
 			wantRefreshed: true,
 		},
@@ -421,7 +421,7 @@ func TestVendedCredsRefreshBufferClampedToLifetime(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	// Short-lived (2m) renewable token. 
+	// Short-lived (2m) renewable token.
 	// Buffer : lifetime/2 (1m), so a just-issued token is served from cache instead of re-fetched at once.
 	shortTTL := 2 * time.Minute
 
@@ -452,6 +452,116 @@ func TestVendedCredsRefreshBufferClampedToLifetime(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), callCount.Load(),
 		"token within the clamped buffer window must be refreshed")
+}
+
+func TestVendedCredsRefreshFailureWithinBufferServesCache(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	fetchErr := errors.New("network error")
+
+	var callCount atomic.Int32
+	r := newTestRefresher(func(ctx context.Context, ident []string) (iceberg.Properties, error) {
+		callCount.Add(1)
+
+		return nil, fetchErr
+	})
+	r.nowFunc = func() time.Time { return now }
+
+	// Cred is inside the prefetch buffer but still valid (not hard-expired).
+	existingIO := iceio.LocalFS{}
+	r.cachedIO = existingIO
+	r.expiresAt = now.Add(defaultVendedCredentialsExpiryBuffer - time.Minute)
+
+	got, err := r.loadFS(context.Background())
+	require.NoError(t, err,
+		"a proactive refresh failure must not error while the cached creds are still valid")
+	assert.Equal(t, existingIO, got, "still-valid cache must be served when refresh fails")
+	assert.Equal(t, int32(1), callCount.Load(), "a refresh should have been attempted")
+}
+
+func TestVendedCredsRefreshBuffer(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+
+	cases := []struct {
+		name      string
+		issuedAt  time.Time
+		expiresAt time.Time
+		want      time.Duration
+	}{
+		{
+			name:      "no issuedAt uses default buffer",
+			expiresAt: now.Add(time.Hour),
+			want:      defaultVendedCredentialsExpiryBuffer,
+		},
+		{
+			name:      "long lifetime uses default buffer",
+			issuedAt:  now,
+			expiresAt: now.Add(time.Hour),
+			want:      defaultVendedCredentialsExpiryBuffer,
+		},
+		{
+			name:      "short lifetime clamps to half",
+			issuedAt:  now,
+			expiresAt: now.Add(2 * time.Minute),
+			want:      time.Minute,
+		},
+		{
+			name:      "negative lifetime clamps to zero",
+			issuedAt:  now,
+			expiresAt: now.Add(-time.Minute),
+			want:      0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			r := &vendedCredentialRefresher{
+				mu:        semaphore.NewWeighted(1),
+				issuedAt:  tc.issuedAt,
+				expiresAt: tc.expiresAt,
+			}
+			assert.Equal(t, tc.want, r.refreshBuffer())
+		})
+	}
+}
+
+func TestVendedCredsIssuedAtUpdatedOnRefreshPreventsSelfRetrigger(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	clock := func() time.Time { return now }
+
+	var callCount atomic.Int32
+	r := newTestRefresher(func(ctx context.Context, ident []string) (iceberg.Properties, error) {
+		callCount.Add(1)
+
+		// Server vends a fresh 60m token relative to the current clock.
+		return iceberg.Properties{
+			keyS3TokenExpiresAtMs: strconv.FormatInt(clock().Add(time.Hour).UnixMilli(), 10),
+		}, nil
+	})
+	r.nowFunc = clock
+
+	// Seed a hard-expired cred to force a refresh.
+	r.cachedIO = iceio.LocalFS{}
+	r.expiresAt = now.Add(-time.Second)
+
+	_, err := r.loadFS(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), callCount.Load(), "expired cred must be refreshed")
+	assert.Equal(t, now, r.issuedAt, "issuedAt must be updated to the refresh time")
+
+	// Immediately after refresh, the fresh token must be served from cache
+	// rather than re-fetched (no self-retrigger).
+	_, err = r.loadFS(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), callCount.Load(),
+		"a freshly refreshed token must not immediately retrigger another fetch")
 }
 
 func TestResolveStorageCredentials(t *testing.T) {

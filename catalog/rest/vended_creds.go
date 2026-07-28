@@ -188,8 +188,6 @@ func (v *vendedCredentialRefresher) shouldRefresh() bool {
 	return v.now().After(v.expiresAt.Add(-v.refreshBuffer()))
 }
 
-// It is set to half the credential's lifetime so a short-lived
-// token doesn't force a re-fetch on every call while still refreshing early.
 func (v *vendedCredentialRefresher) refreshBuffer() time.Duration {
 	buffer := defaultVendedCredentialsExpiryBuffer
 	if v.issuedAt.IsZero() {
