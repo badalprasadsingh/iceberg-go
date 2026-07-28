@@ -564,7 +564,7 @@ func TestSchemasToGlueColumnsPreservesLogicalOrder(t *testing.T) {
 	metadata, err = mb.Build()
 	assert.NoError(t, err)
 
-	columns := schemasToGlueColumns(metadata)
+	columns := schemasToGlueColumns(metadata, nil)
 
 	names := make([]string, len(columns))
 	for i, c := range columns {

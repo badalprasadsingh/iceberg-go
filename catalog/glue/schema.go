@@ -19,8 +19,6 @@ package glue
 
 import (
 	"fmt"
-	"maps"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -92,21 +90,19 @@ func schemasToGlueColumns(metadata table.Metadata, existingColumns []types.Colum
 		}
 	}
 
-	for name, column := range results {
-		if column.Comment != nil {
+	for i := range columns {
+		if columns[i].Comment != nil {
 			continue
 		}
 
-		fieldID := column.Parameters[icebergFieldIDKey]
+		fieldID := columns[i].Parameters[icebergFieldIDKey]
 		if _, ok := clearedComments[fieldID]; ok {
-			column.Comment = aws.String("")
-			results[name] = column
+			columns[i].Comment = aws.String("")
 
 			continue
 		}
 		if comment, ok := existingComments[fieldID]; ok {
-			column.Comment = aws.String(comment)
-			results[name] = column
+			columns[i].Comment = aws.String(comment)
 		}
 	}
 
