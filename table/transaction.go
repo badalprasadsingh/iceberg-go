@@ -328,6 +328,14 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 	if err != nil {
 		return err
 	}
+	// Rollback only ever retargets the MainBranch ref, so it is meaningless on
+	// a branch transaction: silently rolling back main would surprise a caller
+	// who opened the transaction on a branch. Rejecting that explicitly rather
+	// than acting on the wrong ref.
+	if t.branch != "" && t.branch != MainBranch {
+		return fmt.Errorf("%w: RollbackToSnapshot is only supported on the main branch (branch %q)",
+			ErrInvalidOperation, t.branch)
+	}
 	cs := meta.currentSnapshot()
 	if cs == nil {
 		return errors.New("cannot rollback: table has no current snapshot")
@@ -609,27 +617,9 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 // operation is only valid if the data is exactly the same as the previous snapshot.
 //
 // For now, we'll keep using an overwrite operation.
-// requireMainBranch fails loudly for operations whose read-side planning (which
-// existing files to delete, replace, or dedupe against) still resolves against
-// main's head and is not yet branch-aware. On a non-main branch it returns
-// ErrInvalidOperation rather than silently planning against the wrong snapshot;
-// branch-aware planning is tracked as a follow-up (#1638). Appends need no such
-// planning and remain supported on a branch.
-func (t *Transaction) requireMainBranch(op string) error {
-	if t.branch != "" && t.branch != MainBranch {
-		return fmt.Errorf("%w: %s is not yet supported on a branch transaction (branch %q)",
-			ErrInvalidOperation, op, t.branch)
-	}
-
-	return nil
-}
-
 func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties) error {
 	meta, err := t.txnMeta()
 	if err != nil {
-		return err
-	}
-	if err := t.requireMainBranch("ReplaceDataFiles"); err != nil {
 		return err
 	}
 	if len(filesToDelete) == 0 {
@@ -659,7 +649,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		return errors.New("add file paths must be unique for ReplaceDataFiles")
 	}
 
-	s := meta.currentSnapshot()
+	s := meta.currentSnapshotForRef(t.branch)
 	if s == nil {
 		return fmt.Errorf("%w: cannot replace files in a table without an existing snapshot", ErrInvalidOperation)
 	}
@@ -919,9 +909,6 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 	if _, err := t.txnMeta(); err != nil {
 		return err
 	}
-	if err := t.requireMainBranch("AddDataFiles"); err != nil {
-		return err
-	}
 	if len(dataFiles) == 0 {
 		return nil
 	}
@@ -960,7 +947,7 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 	}
 
 	if !cfg.skipDuplicateCheck {
-		if s := meta.currentSnapshot(); s != nil {
+		if s := meta.currentSnapshotForRef(t.branch); s != nil {
 			referenced := make([]string, 0)
 			for df, err := range s.dataFiles(fs, nil) {
 				if err != nil {
@@ -1018,9 +1005,6 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 	if err != nil {
 		return err
 	}
-	if err := t.requireMainBranch("ReplaceDataFilesWithDataFiles"); err != nil {
-		return err
-	}
 	if len(filesToDelete) == 0 {
 		if len(filesToAdd) > 0 {
 			return t.AddDataFiles(ctx, filesToAdd, snapshotProps, opts...)
@@ -1056,7 +1040,7 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 		setToDelete[path] = struct{}{}
 	}
 
-	s := meta.currentSnapshot()
+	s := meta.currentSnapshotForRef(t.branch)
 	if s == nil {
 		return fmt.Errorf("%w: cannot replace files in a table without an existing snapshot", ErrInvalidOperation)
 	}
@@ -1132,9 +1116,6 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	if err != nil {
 		return err
 	}
-	if err := t.requireMainBranch("ReplaceFiles"); err != nil {
-		return err
-	}
 	// Delegate data file replacement to existing logic.
 	if len(deleteFilesToRemove) == 0 {
 		return t.ReplaceDataFilesWithDataFiles(ctx, dataFilesToDelete, dataFilesToAdd, snapshotProps, opts...)
@@ -1193,7 +1174,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		setDeleteFilesToRemove[path] = struct{}{}
 	}
 
-	s := meta.currentSnapshot()
+	s := meta.currentSnapshotForRef(t.branch)
 	if s == nil {
 		return fmt.Errorf("%w: cannot replace files in a table without an existing snapshot", ErrInvalidOperation)
 	}
@@ -1307,9 +1288,6 @@ func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshot
 	if err != nil {
 		return err
 	}
-	if err := t.requireMainBranch("AddFiles"); err != nil {
-		return err
-	}
 	addFilesOp := addFilesOperation{
 		concurrency: runtime.GOMAXPROCS(0),
 	}
@@ -1335,7 +1313,7 @@ func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshot
 	}
 
 	if !ignoreDuplicates {
-		if s := meta.currentSnapshot(); s != nil {
+		if s := meta.currentSnapshotForRef(t.branch); s != nil {
 			referenced := make([]string, 0)
 			for df, err := range s.dataFiles(fs, nil) {
 				if err != nil {
@@ -1476,9 +1454,6 @@ func WithOverwriteCaseInsensitive() OverwriteOption {
 // If concurrency <= 0, defaults to runtime.GOMAXPROCS(0).
 func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties, opts ...OverwriteOption) error {
 	if _, err := t.txnMeta(); err != nil {
-		return err
-	}
-	if err := t.requireMainBranch("Overwrite"); err != nil {
 		return err
 	}
 	overwrite := overwriteOperation{
@@ -1699,9 +1674,6 @@ func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpressi
 	if err != nil {
 		return err
 	}
-	if err := t.requireMainBranch("Delete"); err != nil {
-		return err
-	}
 	deleteOp := deleteOperation{
 		concurrency:   runtime.GOMAXPROCS(0),
 		caseSensitive: true,
@@ -1750,7 +1722,7 @@ func (t *Transaction) classifyFilesForDeletions(ctx context.Context, fs io.IO, f
 		return nil, nil, nil, err
 	}
 
-	s := meta.currentSnapshot()
+	s := meta.currentSnapshotForRef(t.branch)
 	if s == nil {
 		return nil, nil, nil, nil
 	}
@@ -1825,7 +1797,7 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 	classificationTask := newFileClassificationTask(builtMeta, filter, caseSensitive)
 	manifestEvaluators := newKeyDefaultMapWrapErr(classificationTask.buildManifestEvaluator)
 
-	s := meta.currentSnapshot()
+	s := meta.currentSnapshotForRef(t.branch)
 	var manifests []iceberg.ManifestFile
 	if s != nil {
 		manifests, err = s.Manifests(fs)
@@ -2242,7 +2214,7 @@ func (t *Transaction) collectExistingDVs(fs io.IO, files []iceberg.DataFile) (ma
 		return nil, err
 	}
 
-	s := meta.currentSnapshot()
+	s := meta.currentSnapshotForRef(t.branch)
 	if s == nil {
 		return nil, nil
 	}
