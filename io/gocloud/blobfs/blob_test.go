@@ -208,13 +208,13 @@ func TestBlobFileIOOpenPreprocessErrorRetainsOriginalPath(t *testing.T) {
 	assert.Equal(t, name, pathErr.Path)
 }
 
-func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket, allowedSchemes ...string) *BlobFileIO {
+func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket, allowedSchemes ...string) *FileIO {
 	if len(allowedSchemes) == 0 {
 		allowedSchemes = s3TestSchemes
 	}
 	extractor := DefaultObjectLocationExtractor(bucketName, allowedSchemes...)
 
-	return &BlobFileIO{
+	return &FileIO{
 		Bucket:        bucket,
 		extractObject: extractor,
 		ctx:           ctx,
@@ -292,7 +292,7 @@ func TestNewWriterExistsError(t *testing.T) {
 
 	bucket := memblob.OpenBucket(nil)
 
-	bfs := &BlobFileIO{
+	bfs := &FileIO{
 		Bucket:        bucket,
 		extractObject: identityObjectLocation,
 		ctx:           ctx,
@@ -360,7 +360,7 @@ func TestReadAtResourceCleanup(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var lastReaderClosed bool
-			bfs := &BlobFileIO{
+			bfs := &FileIO{
 				Bucket:        bucket,
 				extractObject: identityObjectLocation,
 				ctx:           ctx,
@@ -577,17 +577,6 @@ func TestBlobFileIORawQueryFragmentRoundTrip(t *testing.T) {
 	assert.Equal(t, content, got)
 }
 
-func TestBlobFileIOImplementsBulkRemovableIO(t *testing.T) {
-	bucket := memblob.OpenBucket(nil)
-	defer bucket.Close()
-
-	extractor := DefaultObjectLocationExtractor("test-bucket")
-	bfs := New(context.Background(), bucket, extractor)
-
-	_, ok := bfs.(icebergio.BulkRemovableIO)
-	assert.True(t, ok, "blobFileIO should implement BulkRemovableIO")
-}
-
 func TestBlobFileIODeleteFiles(t *testing.T) {
 	ctx := context.Background()
 	bucket := memblob.OpenBucket(nil)
@@ -600,7 +589,7 @@ func TestBlobFileIODeleteFiles(t *testing.T) {
 
 	extractor := DefaultObjectLocationExtractor("test-bucket")
 	bfs := New(ctx, bucket, extractor)
-	bulk := bfs.(icebergio.BulkRemovableIO)
+	var bulk icebergio.BulkRemovableIO = bfs
 
 	deleted, err := bulk.DeleteFiles(ctx, []string{
 		"s3://test-bucket/data/file1.parquet",
@@ -630,7 +619,7 @@ func TestBlobFileIODeleteFilesMissingFilesAreNotErrors(t *testing.T) {
 
 	extractor := DefaultObjectLocationExtractor("test-bucket")
 	bfs := New(ctx, bucket, extractor)
-	bulk := bfs.(icebergio.BulkRemovableIO)
+	var bulk icebergio.BulkRemovableIO = bfs
 
 	// Deleting non-existent files should succeed.
 	deleted, err := bulk.DeleteFiles(ctx, []string{
@@ -659,7 +648,7 @@ func TestBlobFileIODeleteFilesEmpty(t *testing.T) {
 
 	extractor := DefaultObjectLocationExtractor("test-bucket")
 	bfs := New(ctx, bucket, extractor)
-	bulk := bfs.(icebergio.BulkRemovableIO)
+	var bulk icebergio.BulkRemovableIO = bfs
 
 	deleted, err := bulk.DeleteFiles(ctx, nil)
 	require.NoError(t, err)
@@ -743,7 +732,7 @@ func TestBlobFileIODeleteFilesIsConcurrentAndBounded(t *testing.T) {
 	bucket := blob.NewBucket(tracker)
 	defer bucket.Close()
 
-	bfs := &BlobFileIO{
+	bfs := &FileIO{
 		Bucket:        bucket,
 		extractObject: DefaultObjectLocationExtractor("test-bucket"),
 		ctx:           context.Background(),
@@ -798,7 +787,7 @@ func TestBlobFileIOStat(t *testing.T) {
 
 	require.NoError(t, bucket.WriteAll(ctx, "data/file.parquet", []byte("content"), nil))
 
-	bfs := New(ctx, bucket, DefaultObjectLocationExtractor("test-bucket")).(*BlobFileIO)
+	bfs := New(ctx, bucket, DefaultObjectLocationExtractor("test-bucket"))
 
 	fileInfo, err := bfs.Stat("s3://test-bucket/data/file.parquet")
 	require.NoError(t, err)
@@ -832,7 +821,7 @@ func TestBlobFileIOMkdirAll(t *testing.T) {
 	bucket := memblob.OpenBucket(nil)
 	defer bucket.Close()
 
-	bfs := New(ctx, bucket, DefaultObjectLocationExtractor("test-bucket")).(*BlobFileIO)
+	bfs := New(ctx, bucket, DefaultObjectLocationExtractor("test-bucket"))
 
 	require.NoError(t, bfs.MkdirAll("s3://test-bucket/a/b/c"))
 
@@ -848,7 +837,7 @@ func TestBlobFileIOWalkDirSkipsDirectoryMarker(t *testing.T) {
 	bucket := memblob.OpenBucket(nil)
 	defer bucket.Close()
 
-	bfs := New(ctx, bucket, DefaultObjectLocationExtractor("test-bucket")).(*BlobFileIO)
+	bfs := New(ctx, bucket, DefaultObjectLocationExtractor("test-bucket"))
 
 	// MkdirAll leaves only a "warehouse/ns/" marker for an empty namespace.
 	// Walking "warehouse/ns" should not report that marker as a child file.
@@ -876,7 +865,7 @@ func TestBlobFileIORemoveAll(t *testing.T) {
 	require.NoError(t, bucket.WriteAll(ctx, "warehouse/ns/tbl/data/00001.parquet", []byte("data"), nil))
 	require.NoError(t, bucket.WriteAll(ctx, "warehouse/other/keep.parquet", []byte("keep"), nil))
 
-	bfs := New(ctx, bucket, DefaultObjectLocationExtractor("test-bucket")).(*BlobFileIO)
+	bfs := New(ctx, bucket, DefaultObjectLocationExtractor("test-bucket"))
 
 	require.NoError(t, bfs.RemoveAll("s3://test-bucket/data/file.parquet"))
 	exists, err := bucket.Exists(ctx, "data/file.parquet")

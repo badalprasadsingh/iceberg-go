@@ -34,8 +34,8 @@ import (
 
 // BlobFileIO is the FileIO implementation backed by a gocloud.dev bucket.
 //
-// Deprecated: use [blobfs.BlobFileIO], which does not link any cloud SDK.
-type BlobFileIO = blobfs.BlobFileIO
+// Deprecated: use [blobfs.FileIO], which does not link any cloud SDK.
+type BlobFileIO = blobfs.FileIO
 
 // KeyExtractor extracts the object key from an input path.
 //

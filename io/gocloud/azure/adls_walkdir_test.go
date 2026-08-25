@@ -30,16 +30,13 @@ import (
 	"gocloud.dev/blob/memblob"
 )
 
-func testADLSBlobFileIO(t *testing.T, ctx context.Context, root string, bucket *blob.Bucket) *blobfs.BlobFileIO {
+func testADLSBlobFileIO(t *testing.T, ctx context.Context, root string, bucket *blob.Bucket) *blobfs.FileIO {
 	t.Helper()
 
 	parsed, err := url.Parse(root)
 	require.NoError(t, err)
 
-	bfs, ok := blobfs.New(ctx, bucket, adlsObjectLocationExtractor(parsed)).(*blobfs.BlobFileIO)
-	require.True(t, ok)
-
-	return bfs
+	return blobfs.New(ctx, bucket, adlsObjectLocationExtractor(parsed))
 }
 
 func TestBlobFileIOWalkDirRejectsWrongAzureAuthority(t *testing.T) {
