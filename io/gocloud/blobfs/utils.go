@@ -15,11 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package gocloud
+package blobfs
 
 import "strings"
 
-func propertiesWithPrefix(props map[string]string, prefix string) map[string]string {
+// PropertiesWithPrefix returns the properties whose keys start with prefix,
+// with the prefix removed from each key.
+func PropertiesWithPrefix(props map[string]string, prefix string) map[string]string {
 	result := map[string]string{}
 	for k, v := range props {
 		if after, ok := strings.CutPrefix(k, prefix); ok {

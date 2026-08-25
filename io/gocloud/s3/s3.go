@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package gocloud
+package s3
 
 import (
 	"context"
@@ -35,7 +35,7 @@ import (
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go/auth/bearer"
 	smithymiddleware "github.com/aws/smithy-go/middleware"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
@@ -236,7 +236,7 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 
 	compatMode := s3CompatModeEnabled(props)
 
-	client := s3.NewFromConfig(*awscfg, func(o *s3.Options) {
+	client := awss3.NewFromConfig(*awscfg, func(o *awss3.Options) {
 		if endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
 		}
@@ -305,20 +305,20 @@ const awsChecksumSetupInputContextID = "AWSChecksum:SetupInputContext"
 // callers that need that classification do not duplicate the type switch.
 func clearS3WriteChecksumFields(params any) bool {
 	switch v := params.(type) {
-	case *s3.PutObjectInput:
+	case *awss3.PutObjectInput:
 		v.ChecksumAlgorithm = ""
 		v.ChecksumCRC32, v.ChecksumCRC32C, v.ChecksumCRC64NVME = nil, nil, nil
 		v.ChecksumMD5, v.ChecksumSHA1, v.ChecksumSHA256, v.ChecksumSHA512 = nil, nil, nil, nil
 		v.ChecksumXXHASH128, v.ChecksumXXHASH3, v.ChecksumXXHASH64 = nil, nil, nil
-	case *s3.UploadPartInput:
+	case *awss3.UploadPartInput:
 		v.ChecksumAlgorithm = ""
 		v.ChecksumCRC32, v.ChecksumCRC32C, v.ChecksumCRC64NVME = nil, nil, nil
 		v.ChecksumMD5, v.ChecksumSHA1, v.ChecksumSHA256, v.ChecksumSHA512 = nil, nil, nil, nil
 		v.ChecksumXXHASH128, v.ChecksumXXHASH3, v.ChecksumXXHASH64 = nil, nil, nil
-	case *s3.CreateMultipartUploadInput:
+	case *awss3.CreateMultipartUploadInput:
 		v.ChecksumAlgorithm = ""
 		v.ChecksumType = ""
-	case *s3.CompleteMultipartUploadInput:
+	case *awss3.CompleteMultipartUploadInput:
 		v.ChecksumType = ""
 		v.ChecksumCRC32, v.ChecksumCRC32C, v.ChecksumCRC64NVME = nil, nil, nil
 		v.ChecksumMD5, v.ChecksumSHA1, v.ChecksumSHA256, v.ChecksumSHA512 = nil, nil, nil, nil
@@ -335,7 +335,7 @@ func clearS3WriteChecksumFields(params any) bool {
 // for every other operation (including ones S3 requires a checksum for, such as
 // DeleteObjects) the original behavior is delegated to unchanged.
 //
-// Setting s3.Options.RequestChecksumCalculation to WhenRequired is not enough on
+// Setting awss3.Options.RequestChecksumCalculation to WhenRequired is not enough on
 // its own: the S3 transfer manager overrides that option per call with its own
 // Options.RequestChecksumCalculation, which defaults to WhenSupported, so the
 // SDK re-adds a default CRC32 checksum even in compat mode.

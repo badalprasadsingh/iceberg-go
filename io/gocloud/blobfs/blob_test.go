@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package gocloud
+package blobfs
 
 import (
 	"context"
@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -36,6 +35,13 @@ import (
 	"gocloud.dev/blob/driver"
 	"gocloud.dev/blob/memblob"
 	"gocloud.dev/gcerrors"
+)
+
+// Sample scheme sets; blobfs itself is scheme-agnostic and the authoritative
+// lists live with each backend package.
+var (
+	s3TestSchemes  = []string{"s3", "s3a", "s3n", "oss"}
+	gcsTestSchemes = []string{"gs"}
 )
 
 func TestDefaultKeyExtractor(t *testing.T) {
@@ -113,13 +119,13 @@ func TestDefaultKeyExtractor(t *testing.T) {
 		},
 		{
 			name:            "s3 extractor rejects gs URI with same bucket",
-			allowedSchemes:  s3Schemes,
+			allowedSchemes:  s3TestSchemes,
 			input:           "gs://my-bucket/path/to/file.parquet",
 			wantErrContains: `URI scheme "gs" is not supported`,
 		},
 		{
 			name:            "gcs extractor rejects s3 URI with same bucket",
-			allowedSchemes:  gcsSchemes,
+			allowedSchemes:  gcsTestSchemes,
 			input:           "s3://my-bucket/path/to/file.parquet",
 			wantErrContains: `URI scheme "s3" is not supported`,
 		},
@@ -204,9 +210,9 @@ func TestBlobFileIOOpenPreprocessErrorRetainsOriginalPath(t *testing.T) {
 
 func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket, allowedSchemes ...string) *BlobFileIO {
 	if len(allowedSchemes) == 0 {
-		allowedSchemes = s3Schemes
+		allowedSchemes = s3TestSchemes
 	}
-	extractor := defaultObjectLocationExtractor(bucketName, allowedSchemes...)
+	extractor := DefaultObjectLocationExtractor(bucketName, allowedSchemes...)
 
 	return &BlobFileIO{
 		Bucket:        bucket,
@@ -215,23 +221,8 @@ func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket,
 	}
 }
 
-func testADLSBlobFileIO(t *testing.T, ctx context.Context, root string, bucket *blob.Bucket) *BlobFileIO {
-	t.Helper()
-
-	parsed, err := url.Parse(root)
-	require.NoError(t, err)
-
-	extractor := adlsObjectLocationExtractor(parsed)
-
-	return &BlobFileIO{
-		Bucket:        bucket,
-		extractObject: extractor,
-		ctx:           ctx,
-	}
-}
-
-func identityObjectLocation(location string) (objectLocation, error) {
-	return objectLocation{key: location}, nil
+func identityObjectLocation(location string) (ObjectLocation, error) {
+	return ObjectLocation{key: location}, nil
 }
 
 func TestBlobFileIORejectsUnsupportedObjectPaths(t *testing.T) {
@@ -247,7 +238,7 @@ func TestBlobFileIORejectsUnsupportedObjectPaths(t *testing.T) {
 	}{
 		{
 			name:           "s3 different bucket",
-			allowedSchemes: s3Schemes,
+			allowedSchemes: s3TestSchemes,
 			path:           "s3://other-bucket/data/file.parquet",
 			oldKey:         "other-bucket/data/file.parquet",
 			wantErr:        ErrUnsupportedObjectAuthority,
@@ -255,7 +246,7 @@ func TestBlobFileIORejectsUnsupportedObjectPaths(t *testing.T) {
 		},
 		{
 			name:           "gcs different bucket",
-			allowedSchemes: gcsSchemes,
+			allowedSchemes: gcsTestSchemes,
 			path:           "gs://other-bucket/data/file.parquet",
 			oldKey:         "other-bucket/data/file.parquet",
 			wantErr:        ErrUnsupportedObjectAuthority,
@@ -263,14 +254,14 @@ func TestBlobFileIORejectsUnsupportedObjectPaths(t *testing.T) {
 		},
 		{
 			name:           "s3 rejects gs same bucket",
-			allowedSchemes: s3Schemes,
+			allowedSchemes: s3TestSchemes,
 			path:           "gs://test-bucket/data/file.parquet",
 			oldKey:         "data/file.parquet",
 			wantErrText:    `URI scheme "gs" is not supported`,
 		},
 		{
 			name:           "gcs rejects s3 same bucket",
-			allowedSchemes: gcsSchemes,
+			allowedSchemes: gcsTestSchemes,
 			path:           "s3://test-bucket/data/file.parquet",
 			oldKey:         "data/file.parquet",
 			wantErrText:    `URI scheme "s3" is not supported`,
@@ -487,8 +478,8 @@ func TestBlobFileIOWalkDirRejectsWrongBucket(t *testing.T) {
 		allowedSchemes []string
 		root           string
 	}{
-		{name: "s3", allowedSchemes: s3Schemes, root: "s3://other-bucket/"},
-		{name: "gcs", allowedSchemes: gcsSchemes, root: "gs://other-bucket/data"},
+		{name: "s3", allowedSchemes: s3TestSchemes, root: "s3://other-bucket/"},
+		{name: "gcs", allowedSchemes: gcsTestSchemes, root: "gs://other-bucket/data"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			bfs := testBlobFileIO(ctx, "test-bucket", bucket, tt.allowedSchemes...)
@@ -501,23 +492,6 @@ func TestBlobFileIOWalkDirRejectsWrongBucket(t *testing.T) {
 			require.ErrorIs(t, err, ErrUnsupportedObjectAuthority)
 		})
 	}
-}
-
-func TestBlobFileIOWalkDirRejectsWrongAzureAuthority(t *testing.T) {
-	ctx := context.Background()
-
-	bucket := memblob.OpenBucket(nil)
-	defer bucket.Close()
-
-	bfs := testADLSBlobFileIO(t, ctx, "abfs://container@account.dfs.core.windows.net/", bucket)
-
-	err := bfs.WalkDir("abfs://other@account.dfs.core.windows.net/data", func(string, fs.DirEntry, error) error {
-		t.Fatal("WalkDir callback should not be called")
-
-		return nil
-	})
-	require.ErrorContains(t, err, "does not match configured authority")
-	require.ErrorIs(t, err, ErrUnsupportedObjectAuthority)
 }
 
 func TestBlobFileIOWalkDirRelativeRootReturnsBareKeys(t *testing.T) {
@@ -583,45 +557,6 @@ func TestBlobFileIOWalkDirSubPath(t *testing.T) {
 	assert.ElementsMatch(t, expected, walked)
 }
 
-func TestBlobFileIOWalkDirAzureURI(t *testing.T) {
-	ctx := context.Background()
-
-	bucket := memblob.OpenBucket(nil)
-	defer bucket.Close()
-
-	files := []string{
-		"path/100%off/file.parquet",
-		"path/city=New York/file.parquet",
-		"path/to/file.parquet",
-	}
-	for _, f := range files {
-		require.NoError(t, bucket.WriteAll(ctx, f, []byte("data"), nil))
-	}
-
-	bfs := testADLSBlobFileIO(t, ctx, "abfs://container@account.dfs.core.windows.net/", bucket)
-
-	var walked []string
-	err := bfs.WalkDir("abfs://container@account.dfs.core.windows.net/path", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if !d.IsDir() {
-			walked = append(walked, path)
-		}
-
-		return nil
-	})
-	require.NoError(t, err)
-
-	expected := []string{
-		"abfs://container@account.dfs.core.windows.net/path/100%off/file.parquet",
-		"abfs://container@account.dfs.core.windows.net/path/city=New York/file.parquet",
-		"abfs://container@account.dfs.core.windows.net/path/to/file.parquet",
-	}
-	assert.ElementsMatch(t, expected, walked)
-}
-
 func TestBlobFileIORawQueryFragmentRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
@@ -646,8 +581,8 @@ func TestBlobFileIOImplementsBulkRemovableIO(t *testing.T) {
 	bucket := memblob.OpenBucket(nil)
 	defer bucket.Close()
 
-	extractor := defaultObjectLocationExtractor("test-bucket")
-	bfs := createBlobFS(context.Background(), bucket, extractor)
+	extractor := DefaultObjectLocationExtractor("test-bucket")
+	bfs := New(context.Background(), bucket, extractor)
 
 	_, ok := bfs.(icebergio.BulkRemovableIO)
 	assert.True(t, ok, "blobFileIO should implement BulkRemovableIO")
@@ -663,8 +598,8 @@ func TestBlobFileIODeleteFiles(t *testing.T) {
 	require.NoError(t, bucket.WriteAll(ctx, "data/file2.parquet", []byte("data2"), nil))
 	require.NoError(t, bucket.WriteAll(ctx, "data/file3.parquet", []byte("data3"), nil))
 
-	extractor := defaultObjectLocationExtractor("test-bucket")
-	bfs := createBlobFS(ctx, bucket, extractor)
+	extractor := DefaultObjectLocationExtractor("test-bucket")
+	bfs := New(ctx, bucket, extractor)
 	bulk := bfs.(icebergio.BulkRemovableIO)
 
 	deleted, err := bulk.DeleteFiles(ctx, []string{
@@ -693,8 +628,8 @@ func TestBlobFileIODeleteFilesMissingFilesAreNotErrors(t *testing.T) {
 	bucket := memblob.OpenBucket(nil)
 	defer bucket.Close()
 
-	extractor := defaultObjectLocationExtractor("test-bucket")
-	bfs := createBlobFS(ctx, bucket, extractor)
+	extractor := DefaultObjectLocationExtractor("test-bucket")
+	bfs := New(ctx, bucket, extractor)
 	bulk := bfs.(icebergio.BulkRemovableIO)
 
 	// Deleting non-existent files should succeed.
@@ -710,8 +645,8 @@ func TestBlobFileIORemoveMissingFileReturnsNotExist(t *testing.T) {
 	bucket := memblob.OpenBucket(nil)
 	defer bucket.Close()
 
-	extractor := defaultObjectLocationExtractor("test-bucket")
-	bfs := createBlobFS(ctx, bucket, extractor)
+	extractor := DefaultObjectLocationExtractor("test-bucket")
+	bfs := New(ctx, bucket, extractor)
 
 	err := bfs.Remove("s3://test-bucket/data/nonexistent.parquet")
 	require.ErrorIs(t, err, fs.ErrNotExist)
@@ -722,8 +657,8 @@ func TestBlobFileIODeleteFilesEmpty(t *testing.T) {
 	bucket := memblob.OpenBucket(nil)
 	defer bucket.Close()
 
-	extractor := defaultObjectLocationExtractor("test-bucket")
-	bfs := createBlobFS(ctx, bucket, extractor)
+	extractor := DefaultObjectLocationExtractor("test-bucket")
+	bfs := New(ctx, bucket, extractor)
 	bulk := bfs.(icebergio.BulkRemovableIO)
 
 	deleted, err := bulk.DeleteFiles(ctx, nil)
@@ -810,7 +745,7 @@ func TestBlobFileIODeleteFilesIsConcurrentAndBounded(t *testing.T) {
 
 	bfs := &BlobFileIO{
 		Bucket:        bucket,
-		extractObject: defaultObjectLocationExtractor("test-bucket"),
+		extractObject: DefaultObjectLocationExtractor("test-bucket"),
 		ctx:           context.Background(),
 	}
 	paths := make([]string, pathCount)
@@ -863,7 +798,7 @@ func TestBlobFileIOStat(t *testing.T) {
 
 	require.NoError(t, bucket.WriteAll(ctx, "data/file.parquet", []byte("content"), nil))
 
-	bfs := createBlobFS(ctx, bucket, defaultObjectLocationExtractor("test-bucket")).(*BlobFileIO)
+	bfs := New(ctx, bucket, DefaultObjectLocationExtractor("test-bucket")).(*BlobFileIO)
 
 	fileInfo, err := bfs.Stat("s3://test-bucket/data/file.parquet")
 	require.NoError(t, err)
@@ -897,7 +832,7 @@ func TestBlobFileIOMkdirAll(t *testing.T) {
 	bucket := memblob.OpenBucket(nil)
 	defer bucket.Close()
 
-	bfs := createBlobFS(ctx, bucket, defaultObjectLocationExtractor("test-bucket")).(*BlobFileIO)
+	bfs := New(ctx, bucket, DefaultObjectLocationExtractor("test-bucket")).(*BlobFileIO)
 
 	require.NoError(t, bfs.MkdirAll("s3://test-bucket/a/b/c"))
 
@@ -913,7 +848,7 @@ func TestBlobFileIOWalkDirSkipsDirectoryMarker(t *testing.T) {
 	bucket := memblob.OpenBucket(nil)
 	defer bucket.Close()
 
-	bfs := createBlobFS(ctx, bucket, defaultObjectLocationExtractor("test-bucket")).(*BlobFileIO)
+	bfs := New(ctx, bucket, DefaultObjectLocationExtractor("test-bucket")).(*BlobFileIO)
 
 	// MkdirAll leaves only a "warehouse/ns/" marker for an empty namespace.
 	// Walking "warehouse/ns" should not report that marker as a child file.
@@ -941,7 +876,7 @@ func TestBlobFileIORemoveAll(t *testing.T) {
 	require.NoError(t, bucket.WriteAll(ctx, "warehouse/ns/tbl/data/00001.parquet", []byte("data"), nil))
 	require.NoError(t, bucket.WriteAll(ctx, "warehouse/other/keep.parquet", []byte("keep"), nil))
 
-	bfs := createBlobFS(ctx, bucket, defaultObjectLocationExtractor("test-bucket")).(*BlobFileIO)
+	bfs := New(ctx, bucket, DefaultObjectLocationExtractor("test-bucket")).(*BlobFileIO)
 
 	require.NoError(t, bfs.RemoveAll("s3://test-bucket/data/file.parquet"))
 	exists, err := bucket.Exists(ctx, "data/file.parquet")

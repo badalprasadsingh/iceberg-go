@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package gocloud
+package s3
 
 import (
 	"context"
@@ -36,7 +36,7 @@ import (
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithymiddleware "github.com/aws/smithy-go/middleware"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
@@ -444,8 +444,8 @@ func TestResolveUsePathStyle(t *testing.T) {
 	}
 }
 
-func compatModeS3Options(endpoint string) func(*s3.Options) {
-	return func(o *s3.Options) {
+func compatModeS3Options(endpoint string) func(*awss3.Options) {
+	return func(o *awss3.Options) {
 		o.BaseEndpoint = aws.String(endpoint)
 		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
 		o.APIOptions = append(o.APIOptions, stripS3InputChecksumAlgorithm, stripGCSIncompatibleSignedHeaders)
@@ -508,9 +508,9 @@ func TestCompatModePutObjectNoAwsChunked(t *testing.T) {
 		Credentials: credentials.NewStaticCredentialsProvider("AKIA-TEST", "secret-test", ""),
 		HTTPClient:  srv.Client(),
 	}
-	client := s3.NewFromConfig(cfg, compatModeS3Options(srv.URL))
+	client := awss3.NewFromConfig(cfg, compatModeS3Options(srv.URL))
 
-	_, err := client.PutObject(context.Background(), &s3.PutObjectInput{
+	_, err := client.PutObject(context.Background(), &awss3.PutObjectInput{
 		Bucket: aws.String("test-bucket"),
 		Key:    aws.String("test-key"),
 		Body:   strings.NewReader("hello"),
@@ -535,7 +535,7 @@ func TestCompatModeTransferManagerNoAwsChunked(t *testing.T) {
 		Credentials: credentials.NewStaticCredentialsProvider("AKIA-TEST", "secret-test", ""),
 		HTTPClient:  srv.Client(),
 	}
-	client := s3.NewFromConfig(cfg, compatModeS3Options(srv.URL))
+	client := awss3.NewFromConfig(cfg, compatModeS3Options(srv.URL))
 
 	tm := transfermanager.New(client)
 	_, err := tm.UploadObject(context.Background(), &transfermanager.UploadObjectInput{
@@ -565,9 +565,9 @@ func TestCompatModeGetObjectStripsSignedHeaders(t *testing.T) {
 		Credentials: credentials.NewStaticCredentialsProvider("AKIA-TEST", "secret-test", ""),
 		HTTPClient:  srv.Client(),
 	}
-	client := s3.NewFromConfig(cfg, compatModeS3Options(srv.URL))
+	client := awss3.NewFromConfig(cfg, compatModeS3Options(srv.URL))
 
-	out, err := client.GetObject(context.Background(), &s3.GetObjectInput{
+	out, err := client.GetObject(context.Background(), &awss3.GetObjectInput{
 		Bucket: aws.String("test-bucket"),
 		Key:    aws.String("test-key"),
 	})
@@ -629,23 +629,23 @@ func TestStripS3InputChecksumAlgorithmMiddleware(t *testing.T) {
 	}{
 		{
 			name:  "PutObjectInput",
-			input: &s3.PutObjectInput{ChecksumAlgorithm: s3types.ChecksumAlgorithmCrc32},
+			input: &awss3.PutObjectInput{ChecksumAlgorithm: s3types.ChecksumAlgorithmCrc32},
 			check: func(t *testing.T, in any) {
-				assert.Equal(t, s3types.ChecksumAlgorithm(""), in.(*s3.PutObjectInput).ChecksumAlgorithm)
+				assert.Equal(t, s3types.ChecksumAlgorithm(""), in.(*awss3.PutObjectInput).ChecksumAlgorithm)
 			},
 		},
 		{
 			name:  "UploadPartInput",
-			input: &s3.UploadPartInput{ChecksumAlgorithm: s3types.ChecksumAlgorithmCrc32},
+			input: &awss3.UploadPartInput{ChecksumAlgorithm: s3types.ChecksumAlgorithmCrc32},
 			check: func(t *testing.T, in any) {
-				assert.Equal(t, s3types.ChecksumAlgorithm(""), in.(*s3.UploadPartInput).ChecksumAlgorithm)
+				assert.Equal(t, s3types.ChecksumAlgorithm(""), in.(*awss3.UploadPartInput).ChecksumAlgorithm)
 			},
 		},
 		{
 			name:  "CreateMultipartUploadInput",
-			input: &s3.CreateMultipartUploadInput{ChecksumAlgorithm: s3types.ChecksumAlgorithmCrc32},
+			input: &awss3.CreateMultipartUploadInput{ChecksumAlgorithm: s3types.ChecksumAlgorithmCrc32},
 			check: func(t *testing.T, in any) {
-				assert.Equal(t, s3types.ChecksumAlgorithm(""), in.(*s3.CreateMultipartUploadInput).ChecksumAlgorithm)
+				assert.Equal(t, s3types.ChecksumAlgorithm(""), in.(*awss3.CreateMultipartUploadInput).ChecksumAlgorithm)
 			},
 		},
 	}
@@ -661,11 +661,11 @@ func TestStripS3InputChecksumAlgorithmMiddleware(t *testing.T) {
 				"AWSChecksum:SetupInputContext",
 				func(ctx context.Context, in smithymiddleware.InitializeInput, next smithymiddleware.InitializeHandler) (smithymiddleware.InitializeOutput, smithymiddleware.Metadata, error) {
 					switch v := in.Parameters.(type) {
-					case *s3.PutObjectInput:
+					case *awss3.PutObjectInput:
 						sawAlgorithm = v.ChecksumAlgorithm
-					case *s3.UploadPartInput:
+					case *awss3.UploadPartInput:
 						sawAlgorithm = v.ChecksumAlgorithm
-					case *s3.CreateMultipartUploadInput:
+					case *awss3.CreateMultipartUploadInput:
 						sawAlgorithm = v.ChecksumAlgorithm
 					}
 
@@ -822,7 +822,7 @@ func TestCompatModeMultipartUploadNoChecksumHeaders(t *testing.T) {
 		requests = append(requests, request{op: op, header: h})
 	})
 
-	client := s3.NewFromConfig(compatModeTestConfig(srv), compatModeS3Options(srv.URL))
+	client := awss3.NewFromConfig(compatModeTestConfig(srv), compatModeS3Options(srv.URL))
 	tm := transfermanager.New(client, func(o *transfermanager.Options) {
 		o.PartSizeBytes = partSize
 		o.MultipartUploadThreshold = partSize
@@ -884,8 +884,8 @@ func TestCompatModeExplicitChecksumFieldsStripped(t *testing.T) {
 		}))
 		t.Cleanup(srv.Close)
 
-		client := s3.NewFromConfig(compatModeTestConfig(srv), compatModeS3Options(srv.URL))
-		_, err := client.PutObject(context.Background(), &s3.PutObjectInput{
+		client := awss3.NewFromConfig(compatModeTestConfig(srv), compatModeS3Options(srv.URL))
+		_, err := client.PutObject(context.Background(), &awss3.PutObjectInput{
 			Bucket:        aws.String("test-bucket"),
 			Key:           aws.String("test-key"),
 			Body:          strings.NewReader("hello"),
@@ -905,9 +905,9 @@ func TestCompatModeExplicitChecksumFieldsStripped(t *testing.T) {
 			captured[op] = h
 		})
 
-		client := s3.NewFromConfig(compatModeTestConfig(srv), compatModeS3Options(srv.URL))
+		client := awss3.NewFromConfig(compatModeTestConfig(srv), compatModeS3Options(srv.URL))
 
-		_, err := client.CreateMultipartUpload(context.Background(), &s3.CreateMultipartUploadInput{
+		_, err := client.CreateMultipartUpload(context.Background(), &awss3.CreateMultipartUploadInput{
 			Bucket:            aws.String("test-bucket"),
 			Key:               aws.String("test-key"),
 			ChecksumAlgorithm: s3types.ChecksumAlgorithmCrc32,
@@ -920,7 +920,7 @@ func TestCompatModeExplicitChecksumFieldsStripped(t *testing.T) {
 		assertNoChecksumHeaders(t, captured["CreateMultipartUpload"],
 			"CreateMultipartUpload with explicit checksum")
 
-		_, err = client.CompleteMultipartUpload(context.Background(), &s3.CompleteMultipartUploadInput{
+		_, err = client.CompleteMultipartUpload(context.Background(), &awss3.CompleteMultipartUploadInput{
 			Bucket:        aws.String("test-bucket"),
 			Key:           aws.String("test-key"),
 			UploadId:      aws.String("test-upload-id"),
@@ -960,8 +960,8 @@ func TestCompatModeKeepsCompletedPartBodyChecksums(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	client := s3.NewFromConfig(compatModeTestConfig(srv), compatModeS3Options(srv.URL))
-	_, err := client.CompleteMultipartUpload(context.Background(), &s3.CompleteMultipartUploadInput{
+	client := awss3.NewFromConfig(compatModeTestConfig(srv), compatModeS3Options(srv.URL))
+	_, err := client.CompleteMultipartUpload(context.Background(), &awss3.CompleteMultipartUploadInput{
 		Bucket:   aws.String("test-bucket"),
 		Key:      aws.String("test-key"),
 		UploadId: aws.String("test-upload-id"),
@@ -993,8 +993,8 @@ func TestCompatModeKeepsRequiredChecksumForDeleteObjects(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	client := s3.NewFromConfig(compatModeTestConfig(srv), compatModeS3Options(srv.URL))
-	_, err := client.DeleteObjects(context.Background(), &s3.DeleteObjectsInput{
+	client := awss3.NewFromConfig(compatModeTestConfig(srv), compatModeS3Options(srv.URL))
+	_, err := client.DeleteObjects(context.Background(), &awss3.DeleteObjectsInput{
 		Bucket: aws.String("test-bucket"),
 		Delete: &s3types.Delete{
 			Objects: []s3types.ObjectIdentifier{{Key: aws.String("test-key")}},
@@ -1011,8 +1011,8 @@ func TestCompatModeKeepsRequiredChecksumForDeleteObjects(t *testing.T) {
 func TestNonCompatModeStillSendsChecksums(t *testing.T) {
 	t.Parallel()
 
-	newClient := func(srv *httptest.Server) *s3.Client {
-		return s3.NewFromConfig(compatModeTestConfig(srv), func(o *s3.Options) {
+	newClient := func(srv *httptest.Server) *awss3.Client {
+		return awss3.NewFromConfig(compatModeTestConfig(srv), func(o *awss3.Options) {
 			o.BaseEndpoint = aws.String(srv.URL)
 			o.UsePathStyle = true
 		})
@@ -1028,7 +1028,7 @@ func TestNonCompatModeStillSendsChecksums(t *testing.T) {
 		}))
 		t.Cleanup(srv.Close)
 
-		_, err := newClient(srv).PutObject(context.Background(), &s3.PutObjectInput{
+		_, err := newClient(srv).PutObject(context.Background(), &awss3.PutObjectInput{
 			Bucket: aws.String("test-bucket"),
 			Key:    aws.String("test-key"),
 			Body:   strings.NewReader("hello"),

@@ -15,7 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package gocloud
+// Package blobfs implements the FileIO interfaces on top of a gocloud.dev
+// blob bucket. It carries no cloud SDK dependencies of its own; the backend
+// packages under io/gocloud supply the bucket.
+package blobfs
 
 import (
 	"context"
@@ -83,7 +86,9 @@ var ErrEmptyObjectKey = errors.New("object key is empty")
 // URI to access it; this backend does not route across authorities.
 var ErrUnsupportedObjectAuthority = errors.New("object URI authority is not supported by this FileIO")
 
-type objectLocation struct {
+// ObjectLocation is a parsed object-store URI: the scheme, the authority that
+// owns the object, and the object key within that authority.
+type ObjectLocation struct {
 	scheme       string
 	authority    string
 	key          string
@@ -91,10 +96,10 @@ type objectLocation struct {
 	hasAuthority bool
 }
 
-func splitObjectLocation(location string) (objectLocation, error) {
+func splitObjectLocation(location string) (ObjectLocation, error) {
 	scheme, rest, ok := strings.Cut(location, "://")
 	if !ok {
-		return objectLocation{key: location}, nil
+		return ObjectLocation{key: location}, nil
 	}
 
 	authorityEnd := strings.IndexAny(rest, "/?#")
@@ -104,13 +109,13 @@ func splitObjectLocation(location string) (objectLocation, error) {
 
 	authority := rest[:authorityEnd]
 	if authority == "" {
-		return objectLocation{}, fmt.Errorf("URI authority is empty: %s", location)
+		return ObjectLocation{}, fmt.Errorf("URI authority is empty: %s", location)
 	}
 
 	key := ""
 	if authorityEnd < len(rest) {
 		if rest[authorityEnd] != '/' {
-			return objectLocation{}, fmt.Errorf("URI authority %q must be followed by an object path: %s",
+			return ObjectLocation{}, fmt.Errorf("URI authority %q must be followed by an object path: %s",
 				authority, location)
 		}
 
@@ -119,18 +124,29 @@ func splitObjectLocation(location string) (objectLocation, error) {
 		key = strings.TrimPrefix(rest[authorityEnd:], "/")
 	}
 
-	return objectLocation{
+	return NewObjectLocation(scheme, authority, key), nil
+}
+
+// NewObjectLocation builds a location for a URI that carries an explicit
+// authority. Backends that parse their own URI grammar use it so the URI
+// prefix stays consistent with the scheme and authority they parsed.
+func NewObjectLocation(scheme, authority, key string) ObjectLocation {
+	return ObjectLocation{
 		scheme:       scheme,
 		authority:    authority,
 		key:          key,
 		uriPrefix:    scheme + "://" + authority + "/",
 		hasAuthority: true,
-	}, nil
+	}
 }
 
-type objectLocationExtractor func(location string) (objectLocation, error)
+// ObjectLocationExtractor resolves an input path to the object location this
+// FileIO should act on, rejecting paths that belong to another authority.
+type ObjectLocationExtractor func(location string) (ObjectLocation, error)
 
-func keyExtractorFromObjectLocation(extract objectLocationExtractor) KeyExtractor {
+// KeyExtractorFromObjectLocation adapts an extractor to a KeyExtractor by
+// keeping only the object key.
+func KeyExtractorFromObjectLocation(extract ObjectLocationExtractor) KeyExtractor {
 	return func(location string) (string, error) {
 		parsed, err := extract(location)
 		if err != nil {
@@ -141,20 +157,22 @@ func keyExtractorFromObjectLocation(extract objectLocationExtractor) KeyExtracto
 	}
 }
 
-func defaultObjectLocationExtractor(bucketName string, allowedSchemes ...string) objectLocationExtractor {
-	return func(location string) (objectLocation, error) {
+// DefaultObjectLocationExtractor extracts locations from URIs of the form
+// scheme://bucket/key, accepting only the given schemes and bucket.
+func DefaultObjectLocationExtractor(bucketName string, allowedSchemes ...string) ObjectLocationExtractor {
+	return func(location string) (ObjectLocation, error) {
 		parsed, err := splitObjectLocation(location)
 		if err != nil {
-			return objectLocation{}, err
+			return ObjectLocation{}, err
 		}
 
 		if parsed.hasAuthority {
 			if len(allowedSchemes) > 0 && !slices.Contains(allowedSchemes, parsed.scheme) {
-				return objectLocation{}, fmt.Errorf("URI scheme %q is not supported by this FileIO (allowed: %s): %s",
+				return ObjectLocation{}, fmt.Errorf("URI scheme %q is not supported by this FileIO (allowed: %s): %s",
 					parsed.scheme, strings.Join(allowedSchemes, ", "), location)
 			}
 			if parsed.authority != bucketName {
-				return objectLocation{}, fmt.Errorf("%w: URI authority %q does not match configured authority %q",
+				return ObjectLocation{}, fmt.Errorf("%w: URI authority %q does not match configured authority %q",
 					ErrUnsupportedObjectAuthority,
 					parsed.authority, bucketName)
 			}
@@ -173,13 +191,13 @@ func defaultObjectLocationExtractor(bucketName string, allowedSchemes ...string)
 // defaultKeyExtractor extracts the object key by removing the scheme and bucket name from the URI.
 // e.g., s3://bucket/path/file -> path/file.
 func defaultKeyExtractor(bucketName string, allowedSchemes ...string) KeyExtractor {
-	return keyExtractorFromObjectLocation(defaultObjectLocationExtractor(bucketName, allowedSchemes...))
+	return KeyExtractorFromObjectLocation(DefaultObjectLocationExtractor(bucketName, allowedSchemes...))
 }
 
 type BlobFileIO struct {
 	*blob.Bucket
 
-	extractObject objectLocationExtractor
+	extractObject ObjectLocationExtractor
 	ctx           context.Context
 
 	// newRangeReader is an optional hook for testing.
@@ -213,7 +231,7 @@ func (f blobFileInfo) Sys() any           { return f.sys }
 
 // preprocess returns the object key from an input path
 func (bfs *BlobFileIO) preprocess(path string) (string, error) {
-	location, err := bfs.objectLocation(path)
+	location, err := bfs.resolveLocation(path)
 	if err != nil {
 		return "", err
 	}
@@ -353,19 +371,21 @@ func (bfs *BlobFileIO) NewWriter(ctx context.Context, path string, overwrite boo
 		nil
 }
 
-func createBlobFS(ctx context.Context, bucket *blob.Bucket, extractObject objectLocationExtractor) icebergio.IO {
+// New returns a FileIO backed by bucket, using extractObject to map input
+// paths to object keys within it.
+func New(ctx context.Context, bucket *blob.Bucket, extractObject ObjectLocationExtractor) icebergio.IO {
 	return &BlobFileIO{Bucket: bucket, extractObject: extractObject, ctx: ctx}
 }
 
-func (bfs *BlobFileIO) objectLocation(root string) (objectLocation, error) {
+func (bfs *BlobFileIO) resolveLocation(root string) (ObjectLocation, error) {
 	if bfs.extractObject == nil {
-		return objectLocation{}, errors.New("blob file IO missing object location extractor")
+		return ObjectLocation{}, errors.New("blob file IO missing object location extractor")
 	}
 
 	return bfs.extractObject(root)
 }
 
-func walkedURIPath(location objectLocation, walked string) string {
+func walkedURIPath(location ObjectLocation, walked string) string {
 	if walked == "." {
 		return location.uriPrefix
 	}
@@ -398,7 +418,7 @@ func isDirectoryMarker(walkRootKey string, dirEntry fs.DirEntry) bool {
 }
 
 func (bfs *BlobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
-	location, err := bfs.objectLocation(root)
+	location, err := bfs.resolveLocation(root)
 	var walkPath string
 	if err != nil {
 		if !errors.Is(err, ErrEmptyObjectKey) {

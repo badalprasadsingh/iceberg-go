@@ -6,7 +6,7 @@
 // "License"); you may not use this file except in compliance
 // with the License.  You may obtain a copy of the License at
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+//	http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing,
 // software distributed under the License is distributed on an
@@ -14,29 +14,34 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-
-package hadoop
+// Package s3 registers the S3-compatible FileIO backend. Import it for its
+// side effects to enable s3, s3a, s3n and oss URIs:
+//
+//	import _ "github.com/apache/iceberg-go/io/gocloud/s3"
+package s3
 
 import (
+	"context"
+	"net/url"
+
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/io/gocloud/blobfs"
 )
 
-// HadoopCatalogFS represents all the interfaces that a filesystem implementation
-// must satisfy to be used for a Hadoop catalog implementation.
-type HadoopCatalogFS interface {
-	icebergio.ListableIO
-	icebergio.ReadFileIO
-	icebergio.WriteFileIO
-	icebergio.StatIO
-	icebergio.RenameIO
-	icebergio.RenameNoReplaceIO
-	icebergio.RemoveAllIO
-	icebergio.MkdirAllIO
+// schemes are the URI schemes served by this backend.
+var schemes = []string{"s3", "s3a", "s3n", "oss"}
+
+func init() {
+	factory := func(ctx context.Context, parsed *url.URL, props map[string]string) (icebergio.IO, error) {
+		bucket, err := createS3Bucket(ctx, parsed, props)
+		if err != nil {
+			return nil, err
+		}
+
+		return blobfs.New(ctx, bucket, blobfs.DefaultObjectLocationExtractor(parsed.Host, schemes...)), nil
+	}
+
+	for _, scheme := range schemes {
+		icebergio.Register(scheme, factory)
+	}
 }
-
-// LocalFS can be used to implement a Hadoop catalog with a local filesystem.
-var _ HadoopCatalogFS = (*icebergio.LocalFS)(nil)
-
-// BlobFileIO can be used to implement a Hadoop catalog with a blob storage bucket.
-var _ HadoopCatalogFS = (*blobfs.BlobFileIO)(nil)

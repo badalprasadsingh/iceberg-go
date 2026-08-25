@@ -77,11 +77,20 @@ func init() {
 
 func schemeRegistrationHint(scheme string) string {
 	switch scheme {
-	case "s3", "s3a", "s3n", "gs", "abfs", "abfss", "wasb", "wasbs":
-		return `hint: import the matching IO module for side-effect registration: _ "github.com/apache/iceberg-go/io/gocloud"  // for s3/gcs/azblob`
+	case "s3", "s3a", "s3n", "oss":
+		return schemeImportHint("s3")
+	case "gs":
+		return schemeImportHint("gcs")
+	case "abfs", "abfss", "wasb", "wasbs":
+		return schemeImportHint("azure")
 	default:
 		return ""
 	}
+}
+
+func schemeImportHint(backend string) string {
+	return "hint: import the matching IO module for side-effect registration: " +
+		`_ "github.com/apache/iceberg-go/io/gocloud/` + backend + `"`
 }
 
 func inferFileIOFromScheme(ctx context.Context, path string, props map[string]string) (IO, error) {

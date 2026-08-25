@@ -15,13 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package gocloud
+package azure
 
 import (
 	"context"
 	"net/url"
 	"testing"
 
+	"github.com/apache/iceberg-go/io/gocloud/blobfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -207,14 +208,14 @@ func TestAdlsKeyExtractor(t *testing.T) {
 			name:        "URI with no path",
 			input:       "abfs://container@account.dfs.core.windows.net",
 			expectedErr: "object key is empty",
-			wantErrIs:   ErrEmptyObjectKey,
+			wantErrIs:   blobfs.ErrEmptyObjectKey,
 			shouldError: true,
 		},
 		{
 			name:        "URI with empty path",
 			input:       "abfs://container@account.dfs.core.windows.net/",
 			expectedErr: "object key is empty",
-			wantErrIs:   ErrEmptyObjectKey,
+			wantErrIs:   blobfs.ErrEmptyObjectKey,
 			shouldError: true,
 		},
 		{
@@ -227,7 +228,7 @@ func TestAdlsKeyExtractor(t *testing.T) {
 			name:        "URI with different container",
 			input:       "abfs://other@account.dfs.core.windows.net/path/to/file.parquet",
 			expectedErr: "does not match configured authority",
-			wantErrIs:   ErrUnsupportedObjectAuthority,
+			wantErrIs:   blobfs.ErrUnsupportedObjectAuthority,
 			shouldError: true,
 		},
 		{
@@ -247,7 +248,7 @@ func TestAdlsKeyExtractor(t *testing.T) {
 			parsed, err := url.Parse(root)
 			require.NoError(t, err)
 
-			extractor := keyExtractorFromObjectLocation(adlsObjectLocationExtractor(parsed))
+			extractor := blobfs.KeyExtractorFromObjectLocation(adlsObjectLocationExtractor(parsed))
 			key, err := extractor(test.input)
 
 			if test.shouldError {
