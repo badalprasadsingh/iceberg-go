@@ -807,6 +807,10 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 	var nextFirstRowID int64
 	if inheritRowIDs {
 		nextFirstRowID = *file.FirstRowID()
+		if nextFirstRowID < 0 {
+			return nil, fmt.Errorf("%w: first row ID must be non-negative: %d",
+				ErrInvalidArgument, nextFirstRowID)
+		}
 	}
 
 	return &ManifestReader{
@@ -914,6 +918,25 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 	if c.isFallback {
 		tmp = tmp.(*fallbackManifestEntry).toEntry()
 	}
+	switch tmp.Status() {
+	case EntryStatusEXISTING, EntryStatusADDED, EntryStatusDELETED:
+	default:
+		return nil, fmt.Errorf("manifest entry has invalid status: %d", tmp.Status())
+	}
+
+	entryContent := tmp.DataFile().ContentType()
+	switch entryContent {
+	case EntryContentData:
+		if c.content != ManifestContentData {
+			return nil, errors.New("data file found in delete manifest")
+		}
+	case EntryContentPosDeletes, EntryContentEqDeletes:
+		if c.content != ManifestContentDeletes {
+			return nil, errors.New("delete file found in data manifest")
+		}
+	default:
+		return nil, fmt.Errorf("manifest entry has invalid content: %d", entryContent)
+	}
 	tmp.inherit(c.file)
 	// First Row ID Inheritance (spec): assign the manifest's first_row_id to data
 	// files that lack one, advancing by record_count only on the files actually
@@ -925,8 +948,17 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 	if c.inheritRowIDs && tmp.Status() != EntryStatusDELETED {
 		if df, ok := tmp.DataFile().(*dataFile); ok && df.FirstRowIDField == nil {
 			id := c.nextFirstRowID
+			count := df.Count()
+			if count < 0 {
+				return nil, fmt.Errorf("cannot inherit first row ID for data file %q: %w: record count must be non-negative: %d",
+					df.FilePath(), ErrInvalidArgument, count)
+			}
+			nextFirstRowID, err := advanceRowID(id, 0, count)
+			if err != nil {
+				return nil, fmt.Errorf("cannot inherit first row ID for data file %q: %w", df.FilePath(), err)
+			}
 			df.FirstRowIDField = &id
-			c.nextFirstRowID += df.Count()
+			c.nextFirstRowID = nextFirstRowID
 		}
 	}
 	if fieldToIDMap, ok := tmp.DataFile().(hasFieldToIDMap); ok {
@@ -1427,6 +1459,9 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 	for _, apply := range opts {
 		apply(w)
 	}
+	if w.content != ManifestContentData && w.content != ManifestContentDeletes {
+		return nil, fmt.Errorf("%w: invalid manifest content: %d", ErrInvalidArgument, w.content)
+	}
 	if version < 2 && w.content != ManifestContentData {
 		return nil, fmt.Errorf("unsupported content '%s' for format version '%d'", w.content, version)
 	}
@@ -1517,7 +1552,6 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...M
 	for _, apply := range opts {
 		apply(&mf)
 	}
-
 	// The writer already stamped w.content into the manifest's own avro metadata,
 	// so a different content here would contradict the file it describes.
 	if mf.Content != w.content {
@@ -1569,6 +1603,21 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 	case EntryStatusADDED, EntryStatusEXISTING, EntryStatusDELETED:
 	default:
 		return fmt.Errorf("unknown entry status: %v", status)
+	}
+	if w.version > 1 {
+		entryContent := entry.DataFile().ContentType()
+		switch entryContent {
+		case EntryContentData:
+			if w.content != ManifestContentData {
+				return fmt.Errorf("%w: data file cannot be written to a delete manifest", ErrInvalidArgument)
+			}
+		case EntryContentPosDeletes, EntryContentEqDeletes:
+			if w.content != ManifestContentDeletes {
+				return fmt.Errorf("%w: delete file cannot be written to a data manifest", ErrInvalidArgument)
+			}
+		default:
+			return fmt.Errorf("%w: invalid manifest entry content: %d", ErrInvalidArgument, entryContent)
+		}
 	}
 	count := entry.DataFile().Count()
 

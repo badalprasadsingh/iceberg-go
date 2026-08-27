@@ -43,6 +43,8 @@ import (
 // streaming goroutine has already stopped.
 var ErrWriterClosed = errors.New("writer is closed")
 
+const rollingDataWriterQueueCapacity = 64
+
 // writerFactory manages the creation and lifecycle of RollingDataWriter instances
 // for different partitions, providing shared configuration and coordination
 // across all writers in a partitioned write operation.
@@ -334,7 +336,7 @@ func (w *writerFactory) newRollingDataWriter(ctx context.Context, partition stri
 	writer := &RollingDataWriter{
 		partitionKey:    partition,
 		partitionID:     partitionID,
-		recordCh:        make(chan arrow.RecordBatch, 64),
+		recordCh:        make(chan arrow.RecordBatch, rollingDataWriterQueueCapacity),
 		errorCh:         make(chan error, 1),
 		factory:         w,
 		partitionValues: partitionValues,
@@ -349,9 +351,19 @@ func (w *writerFactory) newRollingDataWriter(ctx context.Context, partition stri
 }
 
 func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) (*RollingDataWriter, error) {
+	if existing, ok := w.writers.Load(partition); ok {
+		if writer, ok := existing.(*RollingDataWriter); ok {
+			return writer, nil
+		}
+
+		return nil, fmt.Errorf("invalid writer type for partition: %s", partition)
+	}
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	// Recheck after acquiring the lock in case another goroutine created the
+	// writer while this goroutine was waiting.
 	if existing, ok := w.writers.Load(partition); ok {
 		if writer, ok := existing.(*RollingDataWriter); ok {
 			return writer, nil
