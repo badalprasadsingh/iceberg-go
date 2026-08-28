@@ -22,18 +22,18 @@ import (
 	"net/url"
 
 	icebergio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/io/gocloud/blobfs"
 	"github.com/apache/iceberg-go/io/gocloud/internal"
 )
 
 func init() {
 	factory := func(ctx context.Context, parsed *url.URL, props map[string]string) (icebergio.IO, error) {
-		// bucket, err := createS3Bucket(ctx, parsed, props)
-		// if err != nil {
-		// 	return nil, err
-		// }
+		bucket, err := createS3Bucket(ctx, parsed, props)
+		if err != nil {
+			return nil, err
+		}
 
-		// return blobfs.New(ctx, bucket, blobfs.DefaultObjectLocationExtractor(parsed.Host, schemes...)), nil
-		return nil, nil
+		return blobfs.New(ctx, bucket, blobfs.DefaultObjectLocationExtractor(parsed.Host, internal.S3Schemes...)), nil
 	}
 
 	for _, scheme := range internal.S3Schemes {

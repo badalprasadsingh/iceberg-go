@@ -22,12 +22,18 @@ import (
 	"net/url"
 
 	icebergio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/io/gocloud/blobfs"
 	"github.com/apache/iceberg-go/io/gocloud/internal"
 )
 
 func init() {
 	factory := func(ctx context.Context, parsed *url.URL, props map[string]string) (icebergio.IO, error) {
-		return nil, nil
+		bucket, err := createAzureBucket(ctx, parsed, props)
+		if err != nil {
+			return nil, err
+		}
+
+		return blobfs.New(ctx, bucket, adlsObjectLocationExtractor(parsed)), nil
 	}
 
 	for _, scheme := range internal.AzureSchemes {

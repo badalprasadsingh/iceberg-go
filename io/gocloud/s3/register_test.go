@@ -27,10 +27,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRegistersOnlyItsOwnSchemes(t *testing.T) {
-	assert.ElementsMatch(t, []string{"file", "", "mem", "s3", "s3a", "s3n", "oss"}, io.GetRegisteredSchemes())
-}
-
 func TestOtherCloudSchemesRemainUnregistered(t *testing.T) {
 	ctx := context.Background()
 

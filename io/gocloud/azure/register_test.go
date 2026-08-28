@@ -27,7 +27,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// what is the work of GetRegisteredSchemes?
 func TestRegisterOnlyItsOwnSchemas(t *testing.T) {
 	assert.ElementsMatch(t, []string{"file", "", "mem", "abfs", "abfss", "wasb", "wasbs"}, io.GetRegisteredSchemes())
 }

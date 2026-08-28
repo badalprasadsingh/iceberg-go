@@ -154,7 +154,3 @@ func (s *AzureBlobIOTestSuite) createContainerIfNotExist(containerName string) e
 func TestAzureBlobIOIntegration(t *testing.T) {
 	suite.Run(t, new(AzureBlobIOTestSuite))
 }
-
-func testADLSBlobFileIO(t *testing.T, ctx context.Context, root string, bucket *blob.Bucket) *blobfs.FileIO {
-	
-}
