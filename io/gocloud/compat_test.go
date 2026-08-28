@@ -51,34 +51,41 @@ func TestDeprecatedParseConfigWrappers(t *testing.T) {
 			{io.GCSEndpoint: "http://localhost:4443", io.GCSUseJSONAPI: "true"},
 		} {
 			want, got := gcs.ParseGCSConfig(props), gocloud.ParseGCSConfig(props)
-			assert.Len(t, got.ClientOptions, len(want.ClientOptions))
 			assert.Equal(t, want, got, "props: %v", props)
 		}
 	})
 
 	t.Run("ParseAWSConfig", func(t *testing.T) {
-		for _, props := range []map[string]string{
-			{},
-			{io.S3Region: "us-west-2"},
-			{io.S3ClientRegion: "eu-central-1"},
-			{io.S3Region: "us-west-2", io.S3ClientRegion: "eu-central-1"},
-			{io.S3AccessKeyID: "ak", io.S3SecretAccessKey: "sk"},
-			{io.S3AccessKeyID: "ak", io.S3SecretAccessKey: "sk", io.S3SessionToken: "st"},
-			{"token": "bearer-token"},
+		for _, tt := range []struct {
+			props  map[string]string
+			static bool
+		}{
+			{props: map[string]string{}},
+			{props: map[string]string{io.S3Region: "us-west-2"}},
+			{props: map[string]string{io.S3ClientRegion: "eu-central-1"}},
+			{props: map[string]string{io.S3Region: "us-west-2", io.S3ClientRegion: "eu-central-1"}},
+			{props: map[string]string{"token": "bearer-token"}},
+			{props: map[string]string{io.S3AccessKeyID: "ak", io.S3SecretAccessKey: "sk"}, static: true},
+			{props: map[string]string{io.S3AccessKeyID: "ak", io.S3SecretAccessKey: "sk", io.S3SessionToken: "st"}, static: true},
 		} {
-			want, wantErr := s3.ParseAWSConfig(ctx, props)
-			got, gotErr := gocloud.ParseAWSConfig(ctx, props)
+			want, wantErr := s3.ParseAWSConfig(ctx, tt.props)
+			got, gotErr := gocloud.ParseAWSConfig(ctx, tt.props)
 
-			require.NoError(t, wantErr, "props: %v", props)
-			require.NoError(t, gotErr, "props: %v", props)
-			assert.Equal(t, want.Region, got.Region, "props: %v", props)
+			require.NoError(t, wantErr, "props: %v", tt.props)
+			require.NoError(t, gotErr, "props: %v", tt.props)
+			assert.Equal(t, want.Region, got.Region, "props: %v", tt.props)
+
+			// Retrieving from the default chain would reach the network, so
+			// only static credentials are compared by value.
+			if !tt.static {
+				continue
+			}
 
 			wantCreds, err := want.Credentials.Retrieve(ctx)
 			require.NoError(t, err)
 			gotCreds, err := got.Credentials.Retrieve(ctx)
 			require.NoError(t, err)
-			assert.Equal(t, wantCreds.AccessKeyID, gotCreds.AccessKeyID, "props: %v", props)
-			assert.Equal(t, wantCreds.SessionToken, gotCreds.SessionToken, "props: %v", props)
+			assert.Equal(t, wantCreds, gotCreds, "props: %v", tt.props)
 		}
 	})
 
