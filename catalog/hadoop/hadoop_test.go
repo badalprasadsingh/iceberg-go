@@ -33,10 +33,12 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/io"
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
@@ -2987,5 +2989,12 @@ func (s *HadoopCatalogTestSuite) TestJoinPathRemotePreservesSchemeAuthority() {
 		s.Run(tt.name, func() {
 			s.Equal(tt.want, joinPath(false, tt.base, tt.parts...))
 		})
+	}
+}
+
+func TestImportRegistersNoCloudSchemes(t *testing.T) {
+	registered := io.GetRegisteredSchemes()
+	for _, scheme := range []string{"s3", "s3a", "s3n", "oss", "gs", "abfs", "abfss", "wasb", "wasbs"} {
+		assert.NotContains(t, registered, scheme)
 	}
 }

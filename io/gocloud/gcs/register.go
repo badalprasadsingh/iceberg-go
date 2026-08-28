@@ -15,17 +15,22 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package gocloud
+package gcs
 
-import "strings"
+import (
+	"context"
+	"net/url"
 
-func propertiesWithPrefix(props map[string]string, prefix string) map[string]string {
-	result := map[string]string{}
-	for k, v := range props {
-		if after, ok := strings.CutPrefix(k, prefix); ok {
-			result[after] = v
-		}
+	icebergio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/io/gocloud/internal"
+)
+
+func init() {
+	factory := func(ctx context.Context, parsed *url.URL, props map[string]string) (icebergio.IO, error) {
+		return nil, nil
 	}
 
-	return result
+	for _, scheme := range internal.GCSSchemes {
+		icebergio.Register(scheme, factory)
+	}
 }

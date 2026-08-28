@@ -15,28 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package hadoop
+package internal
 
-import (
-	icebergio "github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/io/gocloud/blobfs"
+var (
+	AzureSchemes = []string{"abfs", "abfss", "wasb", "wasbs"}
+	GCSSchemes   = []string{"gs"}
+	S3Schemes    = []string{"s3", "s3a", "s3n", "oss"}
 )
-
-// HadoopCatalogFS represents all the interfaces that a filesystem implementation
-// must satisfy to be used for a Hadoop catalog implementation.
-type HadoopCatalogFS interface {
-	icebergio.ListableIO
-	icebergio.ReadFileIO
-	icebergio.WriteFileIO
-	icebergio.StatIO
-	icebergio.RenameIO
-	icebergio.RenameNoReplaceIO
-	icebergio.RemoveAllIO
-	icebergio.MkdirAllIO
-}
-
-// LocalFS can be used to implement a Hadoop catalog with a local filesystem.
-var _ HadoopCatalogFS = (*icebergio.LocalFS)(nil)
-
-// BlobFileIO can be used to implement a Hadoop catalog with a blob storage bucket.
-var _ HadoopCatalogFS = (*blobfs.FileIO)(nil)
