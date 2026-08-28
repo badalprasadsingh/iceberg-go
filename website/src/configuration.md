@@ -232,7 +232,7 @@ iceberg-go reads only a small set of environment variables directly. AWS / GCP /
 |---|---|---|
 | `GOICEBERG_HOME` | Directory containing `.iceberg-go.yaml`. Defaults to the user's home directory. | `config/config.go:87` |
 | `ICEBERG_SQL_DEBUG` | SQL catalog query logging - `1` (failed queries), `2` (all queries). | `catalog/sql/sql.go:206` |
-| `AWS_S3_ENDPOINT` | Fallback S3 endpoint when `s3.endpoint` is unset. | `io/gocloud/s3/s3.go:193` |
+| `AWS_S3_ENDPOINT` | Fallback S3 endpoint when `s3.endpoint` is unset. | `io/gocloud/s3/s3.go:234` |
 
 There is no `PYICEBERG_*`-style env var convention. Use the YAML config file or pass `iceberg.Properties` to overrides programmatically.
 

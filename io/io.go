@@ -24,7 +24,7 @@
 //
 //	import _ "github.com/apache/iceberg-go/io/gocloud"
 //
-// Will register S3, GCS and Azure, and links all three cloud SDKs. Importing
+// will register S3, GCS and Azure, and link all three cloud SDKs. Importing
 // io/gocloud/s3, io/gocloud/gcs or io/gocloud/azure instead registers only that
 // backend. The local filesystem (file:// and empty scheme) is always registered.
 package io
