@@ -15,6 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// Package gcs provides the FileIO backend for Google Cloud Storage. Import it for its side
+// effects to register the gs schemes without linking the other clouds'
+// SDKs:
+//
+//	import _ "github.com/apache/iceberg-go/io/gocloud/gcs"
 package gcs
 
 import (

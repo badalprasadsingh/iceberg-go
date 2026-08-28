@@ -15,6 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// Package azure provides the FileIO backend for Azure Data Lake Storage and Blob Storage. Import it for its side
+// effects to register the abfs, abfss, wasb and wasbs schemes without linking the other clouds'
+// SDKs:
+//
+//	import _ "github.com/apache/iceberg-go/io/gocloud/azure"
 package azure
 
 import (

@@ -15,6 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// Package s3 provides the FileIO backend for S3 and S3-compatible object stores. Import it for its side
+// effects to register the s3, s3a, s3n and oss schemes without linking the other clouds'
+// SDKs:
+//
+//	import _ "github.com/apache/iceberg-go/io/gocloud/s3"
 package s3
 
 import (

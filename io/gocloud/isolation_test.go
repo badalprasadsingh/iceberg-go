@@ -32,9 +32,13 @@ var cloudSDKPrefixes = map[string][]string{
 	"azure": {"github.com/Azure/"},
 }
 
-// a backend that is pulling in another cloud's SDK still registers only its own schemes,
+// A package that pulls in a cloud's SDK still registers only its own schemes,
 // thus, the registry cannot catch it. Inspect the build graph instead.
-func TestBackendsLinkOnlyTheirOwnCloudSDK(t *testing.T) {
+//
+// catalog/hadoop is listed because it needs only the bucket-backed FileIO type;
+// importing io/gocloud for that assertion would link all three SDKs into every
+// binary that uses the Hadoop catalog.
+func TestPackagesLinkOnlyTheirOwnCloudSDK(t *testing.T) {
 	for _, tt := range []struct {
 		pkg   string
 		cloud string
@@ -43,6 +47,7 @@ func TestBackendsLinkOnlyTheirOwnCloudSDK(t *testing.T) {
 		{"./io/gocloud/s3", "aws"},
 		{"./io/gocloud/gcs", "gcp"},
 		{"./io/gocloud/azure", "azure"},
+		{"./catalog/hadoop", ""},
 	} {
 		t.Run(tt.pkg, func(t *testing.T) {
 			deps := packageDeps(t, tt.pkg)

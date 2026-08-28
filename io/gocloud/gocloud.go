@@ -15,6 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// Package gocloud registers every gocloud.dev-backed FileIO implementation and
+// therefore links the AWS, Google Cloud and Azure SDKs. To link only the clouds
+// an application uses, blank-import io/gocloud/s3, io/gocloud/gcs or
+// io/gocloud/azure instead, in any combination.
 package gocloud
 
 import (
