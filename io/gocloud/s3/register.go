@@ -15,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package s3 provides the FileIO backend for S3 and S3-compatible object stores. Import it for its side
-// effects to register the s3, s3a, s3n and oss schemes without linking the other clouds'
+// Package s3 provides the FileIO backend for S3 and S3-compatible object stores.
+// Import it for its side effects to register the s3, s3a, s3n and oss schemes without linking the other clouds'
 // SDKs:
 //
 //	import _ "github.com/apache/iceberg-go/io/gocloud/s3"
@@ -27,12 +27,12 @@ import (
 	"net/url"
 
 	"github.com/apache/iceberg-go/internal/schemes"
-	icebergio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/io/gocloud/blobfs"
 )
 
 func init() {
-	factory := func(ctx context.Context, parsed *url.URL, props map[string]string) (icebergio.IO, error) {
+	factory := func(ctx context.Context, parsed *url.URL, props map[string]string) (io.IO, error) {
 		bucket, err := createS3Bucket(ctx, parsed, props)
 		if err != nil {
 			return nil, err
@@ -42,6 +42,6 @@ func init() {
 	}
 
 	for _, scheme := range schemes.S3 {
-		icebergio.Register(scheme, factory)
+		io.Register(scheme, factory)
 	}
 }

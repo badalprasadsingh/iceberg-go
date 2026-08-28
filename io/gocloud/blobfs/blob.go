@@ -15,9 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package blobfs implements the iceberg-go/io FileIO interfaces on top of a
-// gocloud.dev blob bucket. It links no cloud SDK of its own; the backend
-// packages under io/gocloud each supply a bucket for their cloud.
+// Package blobfs implements the iceberg-go/io FileIO interfaces on top of a gocloud.dev blob bucket.
+// It links no cloud SDK of its own.
+// The backend packages under io/gocloud each supply a bucket for their cloud.
 package blobfs
 
 import (

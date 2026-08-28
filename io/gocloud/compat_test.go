@@ -82,7 +82,6 @@ func TestDeprecatedParseConfigWrappers(t *testing.T) {
 		}
 	})
 
-	// An error from the backend must surface through the wrapper unchanged.
 	t.Run("error is relayed", func(t *testing.T) {
 		props := map[string]string{io.S3RemoteSigningEnabled: "true"}
 		_, wantErr := s3.ParseAWSConfig(ctx, props)

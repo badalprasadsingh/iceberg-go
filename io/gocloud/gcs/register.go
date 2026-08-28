@@ -15,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package gcs provides the FileIO backend for Google Cloud Storage. Import it for its side
-// effects to register the gs schemes without linking the other clouds'
+// Package gcs provides the FileIO backend for Google Cloud Storage.
+// Import it for its side effects to register the gs schemes without linking the other clouds'
 // SDKs:
 //
 //	import _ "github.com/apache/iceberg-go/io/gocloud/gcs"
@@ -27,12 +27,12 @@ import (
 	"net/url"
 
 	"github.com/apache/iceberg-go/internal/schemes"
-	icebergio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/io/gocloud/blobfs"
 )
 
 func init() {
-	factory := func(ctx context.Context, parsed *url.URL, props map[string]string) (icebergio.IO, error) {
+	factory := func(ctx context.Context, parsed *url.URL, props map[string]string) (io.IO, error) {
 		bucket, err := createGCSBucket(ctx, parsed, props)
 		if err != nil {
 			return nil, err
@@ -42,6 +42,6 @@ func init() {
 	}
 
 	for _, scheme := range schemes.GCS {
-		icebergio.Register(scheme, factory)
+		io.Register(scheme, factory)
 	}
 }
