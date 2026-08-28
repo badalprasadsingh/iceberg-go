@@ -332,6 +332,6 @@ func TestBlobFileIOWalkDirAzureURI(t *testing.T) {
 		"abfs://container@account.dfs.core.windows.net/path/city=New York/file.parquet",
 		"abfs://container@account.dfs.core.windows.net/path/to/file.parquet",
 	}
-	
+
 	assert.ElementsMatch(t, expected, walked)
 }

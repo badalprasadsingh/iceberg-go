@@ -47,16 +47,16 @@ type (
 	KeyExtractor = blobfs.KeyExtractor
 )
 
-// ParseAWSConfig parses the S3 properties and returns a configuratin
+// ParseAWSConfig parses the S3 properties and returns a configuration.
 //
-// Depricated: use [s3.ParseAWSConfig]
+// Deprecated: use [s3.ParseAWSConfig]
 func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, error) {
 	return s3.ParseAWSConfig(ctx, props)
 }
 
 // ParseGCSConfig parses GCS properties and returns bucket options.
 //
-// Depricated: use [gcs.ParseGCSConfig]
+// Deprecated: use [gcs.ParseGCSConfig]
 func ParseGCSConfig(props map[string]string) *gcsblob.Options {
 	return gcs.ParseGCSConfig(props)
 }

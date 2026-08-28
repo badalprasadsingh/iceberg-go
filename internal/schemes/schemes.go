@@ -15,10 +15,28 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package internal
+package schemes
+
+import "slices"
 
 var (
-	AzureSchemes = []string{"abfs", "abfss", "wasb", "wasbs"}
-	GCSSchemes   = []string{"gs"}
-	S3Schemes    = []string{"s3", "s3a", "s3n", "oss"}
+	S3    = []string{"s3", "s3a", "s3n", "oss"}
+	GCS   = []string{"gs"}
+	Azure = []string{"abfs", "abfss", "wasb", "wasbs"}
 )
+
+var byBackend = map[string][]string{
+	"s3":    S3,
+	"gcs":   GCS,
+	"azure": Azure,
+}
+
+func BackendFor(scheme string) string {
+	for backend, list := range byBackend {
+		if slices.Contains(list, scheme) {
+			return backend
+		}
+	}
+
+	return ""
+}

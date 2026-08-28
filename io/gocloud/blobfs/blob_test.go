@@ -30,8 +30,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/apache/iceberg-go/internal/schemes"
 	icebergio "github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/io/gocloud/internal"
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/driver"
 	"gocloud.dev/blob/memblob"
@@ -113,13 +113,13 @@ func TestDefaultKeyExtractor(t *testing.T) {
 		},
 		{
 			name:            "s3 extractor rejects gs URI with same bucket",
-			allowedSchemes:  internal.S3Schemes,
+			allowedSchemes:  schemes.S3,
 			input:           "gs://my-bucket/path/to/file.parquet",
 			wantErrContains: `URI scheme "gs" is not supported`,
 		},
 		{
 			name:            "gcs extractor rejects s3 URI with same bucket",
-			allowedSchemes:  internal.GCSSchemes,
+			allowedSchemes:  schemes.GCS,
 			input:           "s3://my-bucket/path/to/file.parquet",
 			wantErrContains: `URI scheme "s3" is not supported`,
 		},
@@ -204,7 +204,7 @@ func TestBlobFileIOOpenPreprocessErrorRetainsOriginalPath(t *testing.T) {
 
 func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket, allowedSchemes ...string) *FileIO {
 	if len(allowedSchemes) == 0 {
-		allowedSchemes = internal.S3Schemes
+		allowedSchemes = schemes.S3
 	}
 	extractor := DefaultObjectLocationExtractor(bucketName, allowedSchemes...)
 
@@ -232,7 +232,7 @@ func TestBlobFileIORejectsUnsupportedObjectPaths(t *testing.T) {
 	}{
 		{
 			name:           "s3 different bucket",
-			allowedSchemes: internal.S3Schemes,
+			allowedSchemes: schemes.S3,
 			path:           "s3://other-bucket/data/file.parquet",
 			oldKey:         "other-bucket/data/file.parquet",
 			wantErr:        ErrUnsupportedObjectAuthority,
@@ -240,7 +240,7 @@ func TestBlobFileIORejectsUnsupportedObjectPaths(t *testing.T) {
 		},
 		{
 			name:           "gcs different bucket",
-			allowedSchemes: internal.GCSSchemes,
+			allowedSchemes: schemes.GCS,
 			path:           "gs://other-bucket/data/file.parquet",
 			oldKey:         "other-bucket/data/file.parquet",
 			wantErr:        ErrUnsupportedObjectAuthority,
@@ -248,14 +248,14 @@ func TestBlobFileIORejectsUnsupportedObjectPaths(t *testing.T) {
 		},
 		{
 			name:           "s3 rejects gs same bucket",
-			allowedSchemes: internal.S3Schemes,
+			allowedSchemes: schemes.S3,
 			path:           "gs://test-bucket/data/file.parquet",
 			oldKey:         "data/file.parquet",
 			wantErrText:    `URI scheme "gs" is not supported`,
 		},
 		{
 			name:           "gcs rejects s3 same bucket",
-			allowedSchemes: internal.GCSSchemes,
+			allowedSchemes: schemes.GCS,
 			path:           "s3://test-bucket/data/file.parquet",
 			oldKey:         "data/file.parquet",
 			wantErrText:    `URI scheme "s3" is not supported`,
@@ -472,8 +472,8 @@ func TestBlobFileIOWalkDirRejectsWrongBucket(t *testing.T) {
 		allowedSchemes []string
 		root           string
 	}{
-		{name: "s3", allowedSchemes: internal.S3Schemes, root: "s3://other-bucket/"},
-		{name: "gcs", allowedSchemes: internal.GCSSchemes, root: "gs://other-bucket/data"},
+		{name: "s3", allowedSchemes: schemes.S3, root: "s3://other-bucket/"},
+		{name: "gcs", allowedSchemes: schemes.GCS, root: "gs://other-bucket/data"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			bfs := testBlobFileIO(ctx, "test-bucket", bucket, tt.allowedSchemes...)

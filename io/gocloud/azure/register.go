@@ -21,9 +21,9 @@ import (
 	"context"
 	"net/url"
 
+	"github.com/apache/iceberg-go/internal/schemes"
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/io/gocloud/blobfs"
-	"github.com/apache/iceberg-go/io/gocloud/internal"
 )
 
 func init() {
@@ -36,7 +36,7 @@ func init() {
 		return blobfs.New(ctx, bucket, adlsObjectLocationExtractor(parsed)), nil
 	}
 
-	for _, scheme := range internal.AzureSchemes {
+	for _, scheme := range schemes.Azure {
 		icebergio.Register(scheme, factory)
 	}
 }

@@ -21,11 +21,16 @@ import (
 	"context"
 	"testing"
 
+	"github.com/apache/iceberg-go/internal/schemes"
 	"github.com/apache/iceberg-go/io"
 	_ "github.com/apache/iceberg-go/io/gocloud/gcs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRegistersOnlyItsOwnSchemes(t *testing.T) {
+	assert.ElementsMatch(t, append([]string{"file", "", "mem"}, schemes.GCS...), io.GetRegisteredSchemes())
+}
 
 func TestOtherCloudSchemesRemainUnregistered(t *testing.T) {
 	ctx := context.Background()

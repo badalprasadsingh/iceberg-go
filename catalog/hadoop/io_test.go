@@ -15,28 +15,21 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package s3
+package hadoop
 
 import (
-	"context"
-	"net/url"
+	"testing"
 
 	"github.com/apache/iceberg-go/internal/schemes"
 	icebergio "github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/io/gocloud/blobfs"
+	"github.com/stretchr/testify/assert"
 )
 
-func init() {
-	factory := func(ctx context.Context, parsed *url.URL, props map[string]string) (icebergio.IO, error) {
-		bucket, err := createS3Bucket(ctx, parsed, props)
-		if err != nil {
-			return nil, err
+func TestImportRegistersNoCloudSchemes(t *testing.T) {
+	registered := icebergio.GetRegisteredSchemes()
+	for _, list := range [][]string{schemes.S3, schemes.GCS, schemes.Azure} {
+		for _, scheme := range list {
+			assert.NotContains(t, registered, scheme)
 		}
-
-		return blobfs.New(ctx, bucket, blobfs.DefaultObjectLocationExtractor(parsed.Host, schemes.S3...)), nil
-	}
-
-	for _, scheme := range schemes.S3 {
-		icebergio.Register(scheme, factory)
 	}
 }

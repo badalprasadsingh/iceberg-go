@@ -24,6 +24,8 @@ import (
 	"net/url"
 	"slices"
 	"sync"
+
+	"github.com/apache/iceberg-go/internal/schemes"
 )
 
 type registry map[string]SchemeFactory
@@ -81,16 +83,12 @@ func schemeImportHint(backend string) string {
 }
 
 func schemeRegistrationHint(scheme string) string {
-	switch scheme {
-	case "s3", "s3a", "s3n", "oss":
-		return schemeImportHint("s3")
-	case "gs":
-		return schemeImportHint("gcs")
-	case "abfs", "abfss", "wasb", "wasbs":
-		return schemeImportHint("azure")
-	default:
+	backend := schemes.BackendFor(scheme)
+	if backend == "" {
 		return ""
 	}
+
+	return schemeImportHint(backend)
 }
 
 func inferFileIOFromScheme(ctx context.Context, path string, props map[string]string) (IO, error) {
