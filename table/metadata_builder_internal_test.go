@@ -357,6 +357,66 @@ func TestAddRemovePartitionSpec(t *testing.T) {
 	require.ErrorContains(t, err, "id 1")
 }
 
+func TestAddPartitionSpecAllocatesAfterHistoricalFieldID(t *testing.T) {
+	data := strings.Replace(ExampleTableMetadataV2,
+		`"last-partition-id": 1000`, `"last-partition-id": 999`, 1)
+	require.Contains(t, data, `"last-partition-id": 999`)
+
+	metadata, err := ParseMetadataBytes([]byte(data))
+	require.NoError(t, err)
+
+	for _, tt := range []struct {
+		name        string
+		dropCounter bool
+	}{
+		{name: "stale counter"},
+		{name: "nil counter", dropCounter: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			builder, err := MetadataBuilderFromBase(metadata, "")
+			require.NoError(t, err)
+			if tt.dropCounter {
+				builder.lastPartitionID = nil
+			}
+
+			addedSpec, err := iceberg.NewPartitionSpecOpts(
+				iceberg.WithSpecID(1),
+				iceberg.AddPartitionFieldBySourceID(1, "x_bucket", iceberg.BucketTransform{NumBuckets: 16}, builder.CurrentSchema(), nil),
+			)
+			require.NoError(t, err)
+			require.NoError(t, builder.AddPartitionSpec(&addedSpec, false))
+
+			rebuilt, err := builder.Build()
+			require.NoError(t, err)
+			added := rebuilt.PartitionSpecByID(1)
+			require.NotNil(t, added)
+			require.Equal(t, 1, added.NumFields())
+			assert.Equal(t, 1001, added.Field(0).FieldID)
+			require.NotNil(t, rebuilt.LastPartitionSpecID())
+			assert.Equal(t, 1001, *rebuilt.LastPartitionSpecID())
+		})
+	}
+}
+
+func TestAddEmptyPartitionSpecRepairsStaleLastPartitionID(t *testing.T) {
+	data := strings.Replace(ExampleTableMetadataV2,
+		`"last-partition-id": 1000`, `"last-partition-id": 999`, 1)
+	require.Contains(t, data, `"last-partition-id": 999`)
+
+	metadata, err := ParseMetadataBytes([]byte(data))
+	require.NoError(t, err)
+	builder, err := MetadataBuilderFromBase(metadata, "")
+	require.NoError(t, err)
+
+	emptySpec := iceberg.NewPartitionSpecID(1)
+	require.NoError(t, builder.AddPartitionSpec(&emptySpec, false))
+
+	rebuilt, err := builder.Build()
+	require.NoError(t, err)
+	require.NotNil(t, rebuilt.LastPartitionSpecID())
+	assert.Equal(t, 1000, *rebuilt.LastPartitionSpecID())
+}
+
 func TestRemovePartitionSpecsNoMatchDoesNotUpdate(t *testing.T) {
 	for _, count := range []int{1, 2, 8, 9, 16, 17, 32, 33, 64} {
 		t.Run(fmt.Sprintf("requested=%d", count), func(t *testing.T) {
@@ -3620,9 +3680,10 @@ func TestSetFormatVersionV2ToV3FromDeserializedMetadata(t *testing.T) {
 // shares with the original instead of copying. Keep this in sync with clone();
 // both the drift guard and its filler consult it.
 var sharedCloneFields = map[string]struct{}{
-	"base":          {}, // immutable snapshot, shared by design.
-	"schemaIndex":   {}, // immutable schema references, copied on schema mutation.
-	"snapshotIndex": {}, // immutable index positions, copied on snapshot mutation.
+	"base":               {}, // immutable snapshot, shared by design.
+	"schemaIndex":        {}, // immutable schema references, copied on schema mutation.
+	"partitionSpecIndex": {}, // immutable index positions, copied on spec mutation.
+	"snapshotIndex":      {}, // immutable index positions, copied on snapshot mutation.
 }
 
 // TestMetadataBuilderCloneCoversAllFields guards clone() against field drift:
