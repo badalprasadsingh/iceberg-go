@@ -732,6 +732,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 				// sentinel deliberately does not wrap ErrCommitFailed.
 				return nil, ccErr
 			}
+			cc.stagedDataManifests = stagedDataManifests(updates)
 			for _, v := range co.validators {
 				if vErr := v(cc); vErr != nil {
 					return nil, vErr
@@ -928,6 +929,25 @@ func latestSnapshotForBranch(meta Metadata, branch string) *Snapshot {
 	}
 
 	return meta.CurrentSnapshot()
+}
+
+// stagedDataManifests returns the data manifests the snapshots in updates
+// write for the data files they add.
+func stagedDataManifests(updates []Update) []iceberg.ManifestFile {
+	var manifests []iceberg.ManifestFile
+	for _, u := range updates {
+		su, ok := u.(*addSnapshotUpdate)
+		if !ok {
+			continue
+		}
+		for _, mf := range su.ownManifests {
+			if mf.ManifestContent() == iceberg.ManifestContentData {
+				manifests = append(manifests, mf)
+			}
+		}
+	}
+
+	return manifests
 }
 
 // stagedSnapshotStillValid reports whether a snapshot built on an earlier

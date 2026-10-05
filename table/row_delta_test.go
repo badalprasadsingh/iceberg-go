@@ -20,6 +20,7 @@ package table_test
 import (
 	"context"
 	"iter"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -1710,4 +1711,184 @@ func writtenManifests(t *testing.T, location string) []string {
 	require.NoError(t, err)
 
 	return paths
+}
+
+// writeRowDeltaDataFile writes a Parquet data file holding ids and returns
+// its manifest entry.
+func writeRowDeltaDataFile(t *testing.T, tbl *table.Table, path string, ids ...int64) iceberg.DataFile {
+	t.Helper()
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	rows := make([]string, 0, len(ids))
+	for _, id := range ids {
+		rows = append(rows, `{"id": `+strconv.FormatInt(id, 10)+`}`)
+	}
+	writeParquetFile(t, path, arrowSc, "["+strings.Join(rows, ",")+"]")
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+
+	b, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		path, iceberg.ParquetFile, nil, nil, nil, int64(len(ids)), info.Size())
+	require.NoError(t, err)
+
+	return b.Build()
+}
+
+// seedRowDeltaDataFile commits a data file holding ids through AddFiles
+// and returns the refreshed table. The table then has a branch head, so
+// commits run the referenced-data-file pre-flight.
+func seedRowDeltaDataFile(t *testing.T, tbl *table.Table, path string, ids ...int64) *table.Table {
+	t.Helper()
+
+	writeRowDeltaDataFile(t, tbl, path, ids...)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), []string{path}, nil, false))
+	tbl, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.NotNil(t, tbl.CurrentSnapshot())
+
+	return tbl
+}
+
+// Why: a data file added by the commit is not on the branch head yet, so
+// requiring head presence rejected deletes that land atomically with it.
+// Condition: a v3 table holding file A; one commit adds file B and DVs for
+// both A and B, from one RowDelta or from two RowDeltas in one transaction.
+// Assertion: the commit succeeds and each DV hides only its own row.
+func TestRowDeltaDeletesDataFileAddedInSameCommit(t *testing.T) {
+	tests := []struct {
+		name  string
+		stage func(t *testing.T, tx *table.Transaction, dataB iceberg.DataFile, dvs ...iceberg.DataFile)
+	}{
+		{
+			name: "same row delta",
+			stage: func(t *testing.T, tx *table.Transaction, dataB iceberg.DataFile, dvs ...iceberg.DataFile) {
+				require.NoError(t, tx.NewRowDelta(nil).AddRows(dataB).AddDeletes(dvs...).Commit(t.Context()))
+			},
+		},
+		{
+			name: "earlier row delta in the transaction",
+			stage: func(t *testing.T, tx *table.Transaction, dataB iceberg.DataFile, dvs ...iceberg.DataFile) {
+				require.NoError(t, tx.NewRowDelta(nil).AddRows(dataB).Commit(t.Context()))
+				require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dvs...).Commit(t.Context()))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tbl := newRowDeltaCommitTestTableVersion(t, 3)
+			location := tbl.Location()
+			pathA := location + "/data/data-a.parquet"
+			pathB := location + "/data/data-b.parquet"
+			tbl = seedRowDeltaDataFile(t, tbl, pathA, 1, 2, 3)
+
+			dataB := writeRowDeltaDataFile(t, tbl, pathB, 4, 5, 6)
+			dvA := writeDV(t, location, "dv-a.puffin", pathA, []int64{0})
+			dvB := writeDV(t, location, "dv-b.puffin", pathB, []int64{2})
+
+			tx := tbl.NewTransaction()
+			tt.stage(t, tx, dataB, dvA, dvB)
+			tbl, err := tx.Commit(t.Context())
+			require.NoError(t, err)
+
+			assert.Equal(t, []int64{2, 3, 4, 5}, idsInTable(t, tbl))
+		})
+	}
+}
+
+// Why: exempting files added by the commit must not waive the check for
+// files the commit neither adds nor finds on the branch head.
+// Condition: a RowDelta adds file B and a DV for a file that never
+// existed in the table.
+// Assertion: the transaction fails with ErrDataFilesMissing naming only
+// the unknown file, and the catalog never receives a commit.
+func TestRowDeltaRejectsDeleteForDataFileNotInCommitOrHead(t *testing.T) {
+	tbl, cat := newConcurrentRewriteTestTableVersion(t, 3)
+	location := tbl.Location()
+	pathB := location + "/data/data-b.parquet"
+	unknownPath := location + "/data/unknown.parquet"
+	tbl = seedRowDeltaDataFile(t, tbl, location+"/data/data-a.parquet", 1, 2)
+	headBefore := tbl.CurrentSnapshot().SnapshotID
+	attemptsBefore := cat.attempts.Load()
+
+	dataB := writeRowDeltaDataFile(t, tbl, pathB, 3, 4)
+	dvB := writeDV(t, location, "dv-b.puffin", pathB, []int64{0})
+	dvUnknown := writeDV(t, location, "dv-unknown.puffin", unknownPath, []int64{0})
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddRows(dataB).AddDeletes(dvB, dvUnknown).Commit(t.Context()))
+	_, err := tx.Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrDataFilesMissing)
+	assert.ErrorContains(t, err, "1 files missing")
+	assert.ErrorContains(t, err, unknownPath)
+	assert.Equal(t, attemptsBefore, cat.attempts.Load())
+	require.NotNil(t, cat.metadata.CurrentSnapshot())
+	assert.Equal(t, headBefore, cat.metadata.CurrentSnapshot().SnapshotID)
+}
+
+// Why: on a retry the pre-flight runs against the refreshed branch head,
+// which still lacks the files the commit adds, while a concurrent removal
+// of a head file it references must still be caught.
+// Condition: a transaction stages a RowDelta adding file B with DVs for
+// head file A and for B; a concurrent commit lands before it.
+// Assertion: after a concurrent append the retry commits with both DVs
+// applied; after a concurrent removal of A the retry fails naming A only.
+func TestRowDeltaDeletesDataFileAddedInSameCommitOnRetry(t *testing.T) {
+	t.Run("concurrent append", func(t *testing.T) {
+		tbl, cat := newConcurrentRewriteTestTableVersion(t, 3)
+		location := tbl.Location()
+		pathA := location + "/data/data-a.parquet"
+		pathB := location + "/data/data-b.parquet"
+		tbl = seedRowDeltaDataFile(t, tbl, pathA, 1, 2, 3)
+
+		dataB := writeRowDeltaDataFile(t, tbl, pathB, 4, 5, 6)
+		dvA := writeDV(t, location, "dv-a.puffin", pathA, []int64{0})
+		dvB := writeDV(t, location, "dv-b.puffin", pathB, []int64{2})
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.NewRowDelta(nil).AddRows(dataB).AddDeletes(dvA, dvB).Commit(t.Context()))
+
+		seedRowDeltaDataFile(t, tbl, location+"/data/data-c.parquet", 7)
+
+		attemptsBefore := cat.attempts.Load()
+		committed, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, int32(2), cat.attempts.Load()-attemptsBefore, "the commit must conflict once and retry")
+		assert.Equal(t, []int64{2, 3, 4, 5, 7}, idsInTable(t, committed))
+	})
+
+	t.Run("concurrent removal of a head file", func(t *testing.T) {
+		tbl, cat := newConcurrentRewriteTestTableVersion(t, 3)
+		location := tbl.Location()
+		pathA := location + "/data/data-a.parquet"
+		pathB := location + "/data/data-b.parquet"
+		tbl = seedRowDeltaDataFile(t, tbl, pathA, 1, 2, 3)
+
+		tasks, err := tbl.Scan().PlanFiles(t.Context())
+		require.NoError(t, err)
+		require.Len(t, tasks, 1)
+		dataA := tasks[0].File
+
+		dataB := writeRowDeltaDataFile(t, tbl, pathB, 4, 5, 6)
+		dvA := writeDV(t, location, "dv-a.puffin", pathA, []int64{0})
+		dvB := writeDV(t, location, "dv-b.puffin", pathB, []int64{2})
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.NewRowDelta(nil).AddRows(dataB).AddDeletes(dvA, dvB).Commit(t.Context()))
+
+		rtx := tbl.NewTransaction()
+		require.NoError(t, rtx.NewRewrite(nil).DeleteFile(dataA).Commit(t.Context()))
+		_, err = rtx.Commit(t.Context())
+		require.NoError(t, err)
+		headBefore := cat.metadata.CurrentSnapshot().SnapshotID
+
+		_, err = tx.Commit(t.Context())
+		require.ErrorIs(t, err, table.ErrDataFilesMissing)
+		assert.ErrorContains(t, err, "1 files missing")
+		assert.ErrorContains(t, err, pathA)
+		assert.Equal(t, headBefore, cat.metadata.CurrentSnapshot().SnapshotID)
+	})
 }
