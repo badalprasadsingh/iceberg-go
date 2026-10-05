@@ -1839,56 +1839,69 @@ func TestRowDeltaRejectsDeleteForDataFileNotInCommitOrHead(t *testing.T) {
 // Assertion: after a concurrent append the retry commits with both DVs
 // applied; after a concurrent removal of A the retry fails naming A only.
 func TestRowDeltaDeletesDataFileAddedInSameCommitOnRetry(t *testing.T) {
-	t.Run("concurrent append", func(t *testing.T) {
-		tbl, cat := newConcurrentRewriteTestTableVersion(t, 3)
-		location := tbl.Location()
-		pathA := location + "/data/data-a.parquet"
-		pathB := location + "/data/data-b.parquet"
-		tbl = seedRowDeltaDataFile(t, tbl, pathA, 1, 2, 3)
+	tests := []struct {
+		name       string
+		concurrent func(t *testing.T, tbl *table.Table, dataA iceberg.DataFile)
+		wantIDs    []int64
+		wantErr    bool
+	}{
+		{
+			name: "concurrent append",
+			concurrent: func(t *testing.T, tbl *table.Table, _ iceberg.DataFile) {
+				seedRowDeltaDataFile(t, tbl, tbl.Location()+"/data/data-c.parquet", 7)
+			},
+			wantIDs: []int64{2, 3, 4, 5, 7},
+		},
+		{
+			name: "concurrent removal of a head file",
+			concurrent: func(t *testing.T, tbl *table.Table, dataA iceberg.DataFile) {
+				tx := tbl.NewTransaction()
+				require.NoError(t, tx.NewRewrite(nil).DeleteFile(dataA).Commit(t.Context()))
+				_, err := tx.Commit(t.Context())
+				require.NoError(t, err)
+			},
+			wantErr: true,
+		},
+	}
 
-		dataB := writeRowDeltaDataFile(t, tbl, pathB, 4, 5, 6)
-		dvA := writeDV(t, location, "dv-a.puffin", pathA, []int64{0})
-		dvB := writeDV(t, location, "dv-b.puffin", pathB, []int64{2})
-		tx := tbl.NewTransaction()
-		require.NoError(t, tx.NewRowDelta(nil).AddRows(dataB).AddDeletes(dvA, dvB).Commit(t.Context()))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tbl, cat := newConcurrentRewriteTestTableVersion(t, 3)
+			location := tbl.Location()
+			pathA := location + "/data/data-a.parquet"
+			pathB := location + "/data/data-b.parquet"
+			tbl = seedRowDeltaDataFile(t, tbl, pathA, 1, 2, 3)
 
-		seedRowDeltaDataFile(t, tbl, location+"/data/data-c.parquet", 7)
+			tasks, err := tbl.Scan().PlanFiles(t.Context())
+			require.NoError(t, err)
+			require.Len(t, tasks, 1)
 
-		attemptsBefore := cat.attempts.Load()
-		committed, err := tx.Commit(t.Context())
-		require.NoError(t, err)
-		assert.Equal(t, int32(2), cat.attempts.Load()-attemptsBefore, "the commit must conflict once and retry")
-		assert.Equal(t, []int64{2, 3, 4, 5, 7}, idsInTable(t, committed))
-	})
+			dataB := writeRowDeltaDataFile(t, tbl, pathB, 4, 5, 6)
+			dvA := writeDV(t, location, "dv-a.puffin", pathA, []int64{0})
+			dvB := writeDV(t, location, "dv-b.puffin", pathB, []int64{2})
+			tx := tbl.NewTransaction()
+			require.NoError(t, tx.NewRowDelta(nil).AddRows(dataB).AddDeletes(dvA, dvB).Commit(t.Context()))
 
-	t.Run("concurrent removal of a head file", func(t *testing.T) {
-		tbl, cat := newConcurrentRewriteTestTableVersion(t, 3)
-		location := tbl.Location()
-		pathA := location + "/data/data-a.parquet"
-		pathB := location + "/data/data-b.parquet"
-		tbl = seedRowDeltaDataFile(t, tbl, pathA, 1, 2, 3)
+			tt.concurrent(t, tbl, tasks[0].File)
+			require.NotNil(t, cat.metadata.CurrentSnapshot())
+			headBefore := cat.metadata.CurrentSnapshot().SnapshotID
+			attemptsBefore := cat.attempts.Load()
 
-		tasks, err := tbl.Scan().PlanFiles(t.Context())
-		require.NoError(t, err)
-		require.Len(t, tasks, 1)
-		dataA := tasks[0].File
+			committed, err := tx.Commit(t.Context())
+			if tt.wantErr {
+				require.ErrorIs(t, err, table.ErrDataFilesMissing)
+				assert.ErrorContains(t, err, "1 files missing")
+				assert.ErrorContains(t, err, pathA)
+				assert.Equal(t, int32(1), cat.attempts.Load()-attemptsBefore,
+					"the retry must be rejected before reaching the catalog")
+				assert.Equal(t, headBefore, cat.metadata.CurrentSnapshot().SnapshotID)
 
-		dataB := writeRowDeltaDataFile(t, tbl, pathB, 4, 5, 6)
-		dvA := writeDV(t, location, "dv-a.puffin", pathA, []int64{0})
-		dvB := writeDV(t, location, "dv-b.puffin", pathB, []int64{2})
-		tx := tbl.NewTransaction()
-		require.NoError(t, tx.NewRowDelta(nil).AddRows(dataB).AddDeletes(dvA, dvB).Commit(t.Context()))
+				return
+			}
 
-		rtx := tbl.NewTransaction()
-		require.NoError(t, rtx.NewRewrite(nil).DeleteFile(dataA).Commit(t.Context()))
-		_, err = rtx.Commit(t.Context())
-		require.NoError(t, err)
-		headBefore := cat.metadata.CurrentSnapshot().SnapshotID
-
-		_, err = tx.Commit(t.Context())
-		require.ErrorIs(t, err, table.ErrDataFilesMissing)
-		assert.ErrorContains(t, err, "1 files missing")
-		assert.ErrorContains(t, err, pathA)
-		assert.Equal(t, headBefore, cat.metadata.CurrentSnapshot().SnapshotID)
-	})
+			require.NoError(t, err)
+			assert.Equal(t, int32(2), cat.attempts.Load()-attemptsBefore, "the commit must conflict once and retry")
+			assert.Equal(t, tt.wantIDs, idsInTable(t, committed))
+		})
+	}
 }
